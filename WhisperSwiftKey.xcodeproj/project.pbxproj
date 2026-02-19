@@ -14,9 +14,11 @@
 		4D749DB7892B079F3C7A4B24 /* HotkeyService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC0FE5D340B33A645E4E55C2 /* HotkeyService.swift */; };
 		5F1A5C6AE4E0D0FC85C9EAAC /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD0CDFF724A58FB4786C0211 /* SettingsView.swift */; };
 		660819813D7CFEFE04052F8B /* WhisperSwiftKeyApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9521A1892E33782CDD712E4B /* WhisperSwiftKeyApp.swift */; };
+		81EDA901A5B89F70A50F4E39 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7523E22EB403FC1A9D6AC67F /* OnboardingView.swift */; };
 		878D3F45A2B7B60FF000C786 /* Transcription.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82BF653E80F483A3CC7E39DF /* Transcription.swift */; };
 		9715D40548791DE98FC223E0 /* WhisperService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D189255E0F22961EB151A53F /* WhisperService.swift */; };
 		BCC69D126D585286E12877B1 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52882CF9CBA0FB24698EDCF6 /* AppState.swift */; };
+		BE379AFA0AAEC1821D9EE706 /* RecordingOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FB64F852AB6FE77871382D5 /* RecordingOverlayView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -24,6 +26,8 @@
 		1B20F86DE7D8C0A295EBEB0A /* WhisperSwiftKey.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = WhisperSwiftKey.entitlements; sourceTree = "<group>"; };
 		1D31BDD4C1E1E0D8FB6ADFF3 /* AudioService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioService.swift; sourceTree = "<group>"; };
 		52882CF9CBA0FB24698EDCF6 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		5FB64F852AB6FE77871382D5 /* RecordingOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingOverlayView.swift; sourceTree = "<group>"; };
+		7523E22EB403FC1A9D6AC67F /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		7C534DBA301653FBF8BB561E /* WhisperSwiftKey.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WhisperSwiftKey.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		82BF653E80F483A3CC7E39DF /* Transcription.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transcription.swift; sourceTree = "<group>"; };
 		9521A1892E33782CDD712E4B /* WhisperSwiftKeyApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperSwiftKeyApp.swift; sourceTree = "<group>"; };
@@ -69,6 +73,8 @@
 			isa = PBXGroup;
 			children = (
 				054A0024E9A7E2C55D4CA200 /* MenuBarView.swift */,
+				7523E22EB403FC1A9D6AC67F /* OnboardingView.swift */,
+				5FB64F852AB6FE77871382D5 /* RecordingOverlayView.swift */,
 				AD0CDFF724A58FB4786C0211 /* SettingsView.swift */,
 			);
 			path = Views;
@@ -166,6 +172,8 @@
 				1F1463E5865BF4B7C7985FDE /* AudioService.swift in Sources */,
 				4D749DB7892B079F3C7A4B24 /* HotkeyService.swift in Sources */,
 				4AE80D5BCC67626ECC4294EE /* MenuBarView.swift in Sources */,
+				81EDA901A5B89F70A50F4E39 /* OnboardingView.swift in Sources */,
+				BE379AFA0AAEC1821D9EE706 /* RecordingOverlayView.swift in Sources */,
 				5F1A5C6AE4E0D0FC85C9EAAC /* SettingsView.swift in Sources */,
 				42A72191909220E9D0FFD2EF /* TextInsertionService.swift in Sources */,
 				878D3F45A2B7B60FF000C786 /* Transcription.swift in Sources */,

@@ -1,17 +1,29 @@
 import Cocoa
 import Carbon
 
-/// Detects global hotkey (double-tap Fn / custom combo) via CGEvent tap
+/// Detects global hotkey (double-tap Fn or push-to-talk) via CGEvent tap
 class HotkeyService {
     private var eventTap: CFMachPort?
-    private var onTrigger: () -> Void
+    private var onToggle: () -> Void // For tap-to-toggle: fires on double-tap
+    var onPushStart: (() -> Void)?   // For push-to-talk: fires on key down
+    var onPushStop: (() -> Void)?    // For push-to-talk: fires on key up
     
-    // Double-tap Fn detection
+    var mode: HotkeyMode = .doubleTap
+    
+    enum HotkeyMode {
+        case doubleTap    // Double-tap Fn toggles recording
+        case pushToTalk   // Hold Fn to record, release to stop
+    }
+    
+    // Double-tap detection
     private var lastFnPressTime: Date?
     private let doubleTapThreshold: TimeInterval = 0.4
     
+    // Push-to-talk state
+    private var isFnHeld = false
+    
     init(onTrigger: @escaping () -> Void) {
-        self.onTrigger = onTrigger
+        self.onToggle = onTrigger
         setupEventTap()
     }
     
@@ -50,7 +62,7 @@ class HotkeyService {
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
         
-        print("[HotkeyService] Event tap active — listening for double-tap Fn")
+        print("[HotkeyService] Event tap active")
     }
     
     private func handleEvent(_ event: CGEvent) {
@@ -60,17 +72,33 @@ class HotkeyService {
         // Only trigger on Fn key alone (no other modifiers)
         let otherModifiers: CGEventFlags = [.maskCommand, .maskShift, .maskControl, .maskAlternate]
         let hasOtherModifiers = !flags.intersection(otherModifiers).isEmpty
+        guard !hasOtherModifiers else { return }
         
-        if isFnPressed && !hasOtherModifiers {
-            let now = Date()
-            if let lastPress = lastFnPressTime, now.timeIntervalSince(lastPress) < doubleTapThreshold {
-                // Double-tap detected!
-                lastFnPressTime = nil
-                DispatchQueue.main.async { [weak self] in
-                    self?.onTrigger()
+        switch mode {
+        case .doubleTap:
+            if isFnPressed {
+                let now = Date()
+                if let lastPress = lastFnPressTime, now.timeIntervalSince(lastPress) < doubleTapThreshold {
+                    lastFnPressTime = nil
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onToggle()
+                    }
+                } else {
+                    lastFnPressTime = now
                 }
-            } else {
-                lastFnPressTime = now
+            }
+            
+        case .pushToTalk:
+            if isFnPressed && !isFnHeld {
+                isFnHeld = true
+                DispatchQueue.main.async { [weak self] in
+                    self?.onPushStart?()
+                }
+            } else if !isFnPressed && isFnHeld {
+                isFnHeld = false
+                DispatchQueue.main.async { [weak self] in
+                    self?.onPushStop?()
+                }
             }
         }
     }

@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct WhisperSwiftKeyApp: App {
     @StateObject private var appState = AppState()
+    @State private var showOnboarding = !UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
     
     var body: some Scene {
         MenuBarExtra {
@@ -17,5 +18,14 @@ struct WhisperSwiftKeyApp: App {
             SettingsView()
                 .environmentObject(appState)
         }
+        
+        // Onboarding window
+        Window("Welcome to WhisperSwiftKey", id: "onboarding") {
+            OnboardingView(isPresented: $showOnboarding)
+                .environmentObject(appState)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
     }
 }

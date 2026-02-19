@@ -24,11 +24,12 @@ struct SettingsView: View {
                 }
             
             HistorySettingsView()
+                .environmentObject(appState)
                 .tabItem {
                     Label("History", systemImage: "clock")
                 }
         }
-        .frame(width: 500, height: 400)
+        .frame(width: 520, height: 440)
     }
 }
 
@@ -45,6 +46,17 @@ struct GeneralSettingsView: View {
                         Text(mode.rawValue).tag(mode)
                     }
                 }
+                .onChange(of: appState.recordingMode) { _, newValue in
+                    appState.hotkeyService?.mode = newValue == .pushToTalk ? .pushToTalk : .doubleTap
+                    if newValue == .pushToTalk {
+                        appState.hotkeyService?.onPushStart = { [weak appState] in
+                            appState?.startRecording()
+                        }
+                        appState.hotkeyService?.onPushStop = { [weak appState] in
+                            appState?.stopRecording()
+                        }
+                    }
+                }
                 
                 Toggle("Auto-insert text at cursor", isOn: $appState.autoInsertText)
                 Toggle("Show recording overlay", isOn: $appState.showOverlay)
@@ -53,13 +65,36 @@ struct GeneralSettingsView: View {
             Section("Language") {
                 Picker("Language", selection: $appState.selectedLanguage) {
                     Text("Auto-detect").tag("auto")
+                    Divider()
                     Text("English").tag("en")
                     Text("Spanish").tag("es")
                     Text("French").tag("fr")
                     Text("German").tag("de")
+                    Text("Italian").tag("it")
+                    Text("Portuguese").tag("pt")
+                    Text("Dutch").tag("nl")
+                    Text("Russian").tag("ru")
                     Text("Japanese").tag("ja")
+                    Text("Korean").tag("ko")
                     Text("Chinese").tag("zh")
-                    // TODO: Full 58-language list
+                    Text("Arabic").tag("ar")
+                    Text("Hindi").tag("hi")
+                    Text("Turkish").tag("tr")
+                    Text("Polish").tag("pl")
+                    Text("Swedish").tag("sv")
+                    Text("Danish").tag("da")
+                    Text("Norwegian").tag("no")
+                    Text("Finnish").tag("fi")
+                    Text("Czech").tag("cs")
+                    Text("Romanian").tag("ro")
+                    Text("Hungarian").tag("hu")
+                    Text("Greek").tag("el")
+                    Text("Hebrew").tag("he")
+                    Text("Thai").tag("th")
+                    Text("Ukrainian").tag("uk")
+                    Text("Vietnamese").tag("vi")
+                    Text("Indonesian").tag("id")
+                    Text("Malay").tag("ms")
                 }
             }
             
@@ -84,44 +119,73 @@ struct ModelsSettingsView: View {
     @EnvironmentObject var appState: AppState
     
     var body: some View {
-        List {
-            ForEach(WhisperService.availableModels, id: \.name) { model in
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(model.displayName)
-                                .font(.headline)
-                            if model.recommended {
-                                Text("Recommended")
-                                    .font(.caption)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.accentColor.opacity(0.2))
-                                    .cornerRadius(4)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Whisper Models")
+                .font(.headline)
+            
+            Text("Models are downloaded from HuggingFace on first use.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+            List {
+                ForEach(WhisperService.availableModels) { model in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(model.displayName)
+                                    .font(.headline)
+                                if model.recommended {
+                                    Text("Recommended")
+                                        .font(.caption2)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.accentColor.opacity(0.2))
+                                        .cornerRadius(4)
+                                }
+                                if appState.selectedModel == model.name {
+                                    Text("Active")
+                                        .font(.caption2)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.green.opacity(0.2))
+                                        .cornerRadius(4)
+                                }
                             }
+                            
+                            HStack(spacing: 12) {
+                                Label(ByteCountFormatter.string(fromByteCount: model.sizeBytes, countStyle: .file), systemImage: "internaldrive")
+                                HStack(spacing: 2) {
+                                    Image(systemName: "star.fill")
+                                    Text("\(model.qualityRating)/5")
+                                }
+                                HStack(spacing: 2) {
+                                    Image(systemName: "bolt.fill")
+                                    Text("\(model.speedRating)/5")
+                                }
+                            }
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                         }
                         
-                        HStack(spacing: 12) {
-                            Label("\(ByteCountFormatter.string(fromByteCount: model.sizeBytes, countStyle: .file))", systemImage: "internaldrive")
-                            Label("Quality: \(model.qualityRating)/5", systemImage: "star.fill")
-                            Label("Speed: \(model.speedRating)/5", systemImage: "bolt.fill")
-                        }
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    }
-                    
-                    Spacer()
-                    
-                    if appState.selectedModel == model.name {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundColor(.accentColor)
-                    } else {
-                        Button("Select") {
-                            appState.selectedModel = model.name
+                        Spacer()
+                        
+                        if appState.whisperService.isDownloading && appState.selectedModel == model.name {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else if appState.selectedModel == model.name {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.accentColor)
+                        } else {
+                            Button("Select") {
+                                appState.selectedModel = model.name
+                                Task {
+                                    try? await appState.whisperService.loadModel(model.name)
+                                }
+                            }
                         }
                     }
+                    .padding(.vertical, 4)
                 }
-                .padding(.vertical, 4)
             }
         }
         .padding()
@@ -193,13 +257,70 @@ struct DictionarySettingsView: View {
 // MARK: - History
 
 struct HistorySettingsView: View {
+    @EnvironmentObject var appState: AppState
+    @State private var history: [Transcription] = []
+    @State private var searchText = ""
+    
+    var filteredHistory: [Transcription] {
+        if searchText.isEmpty { return history }
+        return history.filter { $0.originalText.localizedCaseInsensitiveContains(searchText) }
+    }
+    
     var body: some View {
-        VStack {
-            Text("Transcription history")
-                .font(.headline)
-            Text("Coming soon — search and browse past transcriptions")
-                .foregroundColor(.secondary)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Transcription History")
+                    .font(.headline)
+                Spacer()
+                Button("Clear All", role: .destructive) {
+                    appState.clearHistory()
+                    history = []
+                }
+                .disabled(history.isEmpty)
+            }
+            
+            TextField("Search...", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+            
+            if filteredHistory.isEmpty {
+                VStack {
+                    Spacer()
+                    Text(history.isEmpty ? "No transcriptions yet" : "No matches")
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                List(filteredHistory, id: \.id) { item in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(item.originalText)
+                            .font(.body)
+                            .lineLimit(2)
+                        
+                        HStack(spacing: 12) {
+                            Text(item.timestamp, style: .relative)
+                            Text("\(item.wordCount) words")
+                            Text(String(format: "%.1fs", item.durationSeconds))
+                            if let lang = item.language {
+                                Text(lang.uppercased())
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                    .contextMenu {
+                        Button("Copy") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(item.originalText, forType: .string)
+                        }
+                    }
+                }
+            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+        .onAppear {
+            history = appState.fetchHistory()
+        }
     }
 }
