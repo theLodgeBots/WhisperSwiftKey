@@ -5,12 +5,19 @@ options:
     macOS: "14.0"
   xcodeVersion: "15.0"
 
+packages:
+  WhisperKit:
+    url: https://github.com/argmaxinc/WhisperKit
+    from: "0.9.0"
+
 targets:
   WhisperSwiftKey:
     type: application
     platform: macOS
     sources:
       - WhisperSwiftKey
+    dependencies:
+      - package: WhisperKit
     settings:
       base:
         INFOPLIST_FILE: WhisperSwiftKey/Info.plist
