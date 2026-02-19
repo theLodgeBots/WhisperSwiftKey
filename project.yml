@@ -1,0 +1,24 @@
+name: WhisperSwiftKey
+options:
+  bundleIdPrefix: com.laanlabs
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "15.0"
+
+targets:
+  WhisperSwiftKey:
+    type: application
+    platform: macOS
+    sources:
+      - WhisperSwiftKey
+    settings:
+      base:
+        INFOPLIST_FILE: WhisperSwiftKey/Info.plist
+        CODE_SIGN_ENTITLEMENTS: WhisperSwiftKey/WhisperSwiftKey.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: com.laanlabs.WhisperSwiftKey
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+    entitlements:
+      path: WhisperSwiftKey/WhisperSwiftKey.entitlements
