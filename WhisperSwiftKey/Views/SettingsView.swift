@@ -237,9 +237,15 @@ struct ModelsSettingsView: View {
             Text("Whisper Models")
                 .font(.headline)
             
-            Text("Models are downloaded from HuggingFace on first use.")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            HStack(spacing: 4) {
+                Text("Models are downloaded from HuggingFace on first use.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Link(destination: URL(string: "https://huggingface.co/argmaxinc/whisperkit-coreml")!) {
+                    Image(systemName: "arrow.up.right.square")
+                        .font(.caption)
+                }
+            }
             
             List {
                 ForEach(WhisperService.availableModels) { model in
@@ -264,6 +270,12 @@ struct ModelsSettingsView: View {
                                         .background(Color.green.opacity(0.2))
                                         .cornerRadius(4)
                                 }
+                                Link(destination: URL(string: "https://huggingface.co/argmaxinc/whisperkit-coreml/tree/main/\(model.name)")!) {
+                                    Image(systemName: "link")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                .help("View on HuggingFace")
                             }
                             
                             HStack(spacing: 12) {

@@ -10,6 +10,7 @@ enum RecordingMode: String, CaseIterable {
 
 enum TranscriptionState {
     case idle
+    case loadingModel
     case recording
     case processing
     case done(String)
@@ -58,6 +59,7 @@ final class AppState: ObservableObject {
     let audioService = AudioService()
     let whisperService = WhisperService()
     let textInsertionService = TextInsertionService()
+    private let recordingOverlayController = RecordingOverlayController()
 
     var hotkeyService: HotkeyService?
 
@@ -171,7 +173,47 @@ final class AppState: ObservableObject {
         isRecording ? stopRecording() : startRecording()
     }
 
+    func sleepModel() {
+        whisperService.sleepModel()
+    }
+
+    func wakeModel() {
+        guard whisperService.isModelAsleep else { return }
+        Task {
+            try? await whisperService.wakeModel()
+        }
+    }
+
     func startRecording() {
+        guard !isRecording else { return }
+
+        if whisperService.isModelAsleep {
+            transcriptionState = .loadingModel
+            let sessionID = UUID()
+            liveDictationSessionID = sessionID
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.whisperService.wakeModel()
+                } catch {
+                    await MainActor.run {
+                        guard self.liveDictationSessionID == sessionID else { return }
+                        self.transcriptionState = .error("Failed to wake model: \(error.localizedDescription)")
+                    }
+                    return
+                }
+                await MainActor.run {
+                    guard self.liveDictationSessionID == sessionID else { return }
+                    self.proceedWithRecording()
+                }
+            }
+            return
+        }
+
+        proceedWithRecording()
+    }
+
+    private func proceedWithRecording() {
         guard !isRecording else { return }
         beginLiveDictationSession()
         isRecording = true
@@ -551,12 +593,32 @@ final class AppState: ObservableObject {
             }
             .store(in: &cancellables)
 
+        Publishers.CombineLatest($transcriptionState, $showOverlay)
+            .sink { [weak self] state, showOverlay in
+                self?.updateRecordingOverlay(state: state, showOverlay: showOverlay)
+            }
+            .store(in: &cancellables)
+
         NSWorkspace.shared.notificationCenter
             .publisher(for: NSWorkspace.didActivateApplicationNotification)
             .sink { [weak self] notification in
                 self?.handleActivatedApplication(notification)
             }
             .store(in: &cancellables)
+    }
+
+    private func updateRecordingOverlay(state: TranscriptionState, showOverlay: Bool) {
+        guard showOverlay else {
+            recordingOverlayController.dismiss()
+            return
+        }
+
+        switch state {
+        case .recording, .loadingModel:
+            recordingOverlayController.show(state: state, modelName: whisperService.currentModelName)
+        default:
+            recordingOverlayController.dismiss()
+        }
     }
 
     func refreshFnKeyConflictStatus() {

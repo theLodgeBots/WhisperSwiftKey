@@ -10,6 +10,7 @@ class WhisperService: ObservableObject {
     private var realtimeSessionID = UUID()
     
     @Published var isModelLoaded = false
+    @Published var isModelAsleep = false
     @Published var isDownloading = false
     @Published var downloadProgress: Double = 0
     @Published var currentModelName: String?
@@ -57,6 +58,21 @@ class WhisperService: ObservableObject {
         }
     }
     
+    func sleepModel() {
+        guard isModelLoaded else { return }
+        print("[WhisperService] Sleeping model to reclaim VRAM")
+        whisperKit = nil
+        isModelLoaded = false
+        isModelAsleep = true
+    }
+
+    func wakeModel() async throws {
+        guard isModelAsleep, let modelName = currentModelName else { return }
+        print("[WhisperService] Waking model: \(modelName)")
+        isModelAsleep = false
+        try await loadModel(modelName)
+    }
+
     func transcribe(
         samples: [Float],
         language: String? = nil,
@@ -78,19 +94,21 @@ class WhisperService: ObservableObject {
         let options = DecodingOptions(
             language: language,
             usePrefillPrompt: true,
+            skipSpecialTokens: true,
             promptTokens: promptTokens
         )
-        
+
         let results = await kit.transcribe(audioArrays: [samples], decodeOptions: options)
-        
-        // Flatten results
-        let text = results
-            .compactMap { $0 }
-            .flatMap { $0 }
-            .map { $0.text }
-            .joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
+        // Flatten results and strip any residual Whisper control tokens
+        let text = Self.stripWhisperTokens(
+            results
+                .compactMap { $0 }
+                .flatMap { $0 }
+                .map { $0.text }
+                .joined(separator: " ")
+        )
+
         print("[WhisperService] Transcribed: \(text.prefix(100))")
         return text
     }
@@ -123,6 +141,7 @@ class WhisperService: ObservableObject {
         let options = DecodingOptions(
             language: language,
             usePrefillPrompt: true,
+            skipSpecialTokens: true,
             promptTokens: promptTokens
         )
 
@@ -211,7 +230,13 @@ class WhisperService: ObservableObject {
             suffix = unconfirmedSegmentsText
         }
 
-        return (confirmed + suffix).trimmingCharacters(in: .whitespacesAndNewlines)
+        return stripWhisperTokens(confirmed + suffix)
+    }
+
+    /// Remove Whisper control tokens like <|startoftranscript|>, <|en|>, <|0.00|>, etc.
+    private static func stripWhisperTokens(_ text: String) -> String {
+        text.replacingOccurrences(of: "<\\|[^|>]*\\|>", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

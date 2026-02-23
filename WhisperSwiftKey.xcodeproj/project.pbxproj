@@ -3,11 +3,12 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 63;
 	objects = {
 
 /* Begin PBXBuildFile section */
 		0BA31B87E41BAE1AB132574D /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = E177C4199EA6FFD854D13A87 /* WhisperKit */; };
+		7FE6C02A2F4CABAE0043A924 /* Media.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7FE6C0292F4CABAE0043A923 /* Media.xcassets */; };
 		1F1463E5865BF4B7C7985FDE /* AudioService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D31BDD4C1E1E0D8FB6ADFF3 /* AudioService.swift */; };
 		42A72191909220E9D0FFD2EF /* TextInsertionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDDA52F410D49830AE1AA4F2 /* TextInsertionService.swift */; };
 		4AE80D5BCC67626ECC4294EE /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 054A0024E9A7E2C55D4CA200 /* MenuBarView.swift */; };
@@ -29,6 +30,7 @@
 		5FB64F852AB6FE77871382D5 /* RecordingOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingOverlayView.swift; sourceTree = "<group>"; };
 		7523E22EB403FC1A9D6AC67F /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		7C534DBA301653FBF8BB561E /* WhisperSwiftKey.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WhisperSwiftKey.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		7FE6C0292F4CABAE0043A923 /* Media.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Media.xcassets; sourceTree = "<group>"; };
 		82BF653E80F483A3CC7E39DF /* Transcription.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transcription.swift; sourceTree = "<group>"; };
 		9521A1892E33782CDD712E4B /* WhisperSwiftKeyApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhisperSwiftKeyApp.swift; sourceTree = "<group>"; };
 		95544CFB280BFF5584DBEE0F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -49,6 +51,17 @@
 		};
 /* End PBXFrameworksBuildPhase section */
 
+/* Begin PBXResourcesBuildPhase section */
+		7FE6C02B2F4CABAE0043A925 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7FE6C02A2F4CABAE0043A924 /* Media.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXGroup section */
 		02FFFF1B7EA7E6444E485E3F /* Services */ = {
 			isa = PBXGroup;
@@ -64,6 +77,7 @@
 		09ADA61C35BF7A7E4E0A288E = {
 			isa = PBXGroup;
 			children = (
+				7FE6C0292F4CABAE0043A923 /* Media.xcassets */,
 				6E54AB7553D5A3D81E330728 /* WhisperSwiftKey */,
 				B4E8424BC02A523512F8DCA2 /* Products */,
 			);
@@ -119,6 +133,7 @@
 			buildPhases = (
 				9D5F0CB3A70FAE7C6D658AE7 /* Sources */,
 				90B1E77C8ECC4F047E2327BF /* Frameworks */,
+				7FE6C02B2F4CABAE0043A925 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -154,7 +169,6 @@
 			packageReferences = (
 				CDBB0EA2695B703300D27583 /* XCRemoteSwiftPackageReference "WhisperKit" */,
 			);
-			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -190,9 +204,24 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = WhisperSwiftKey/WhisperSwiftKey.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 34FWY7G2HB;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = NO;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
 				INFOPLIST_FILE = WhisperSwiftKey/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -200,6 +229,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.laanlabs.WhisperSwiftKey;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.9;
 			};
@@ -266,9 +296,24 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = WhisperSwiftKey/WhisperSwiftKey.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 34FWY7G2HB;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = NO;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
 				INFOPLIST_FILE = WhisperSwiftKey/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -276,6 +321,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.laanlabs.WhisperSwiftKey;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.9;
 			};

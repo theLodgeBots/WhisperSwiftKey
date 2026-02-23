@@ -58,8 +58,35 @@ struct MenuBarView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             
+            if appState.whisperService.isModelLoaded {
+                Button {
+                    appState.sleepModel()
+                } label: {
+                    Label("Sleep Model", systemImage: "moon.fill")
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+            } else if appState.whisperService.isModelAsleep {
+                Button {
+                    appState.wakeModel()
+                } label: {
+                    Label("Wake Model", systemImage: "sun.max.fill")
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+            } else if appState.whisperService.isDownloading {
+                HStack {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading model...")
+                        .font(.body)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+            }
+
             Divider()
-            
+
             Button("Settings...") {
                 NSApp.activate(ignoringOtherApps: true)
                 openSettings()
@@ -197,6 +224,7 @@ struct MenuBarView: View {
         }
         switch appState.transcriptionState {
         case .idle: return .green
+        case .loadingModel: return .orange
         case .recording: return .red
         case .processing: return .orange
         case .done: return .green
@@ -213,6 +241,7 @@ struct MenuBarView: View {
         }
         switch appState.transcriptionState {
         case .idle: return "Ready - Double-tap Fn/Globe to dictate"
+        case .loadingModel: return "Loading model..."
         case .recording: return "Dictating..."
         case .processing: return "Transcribing..."
         case .done(let text): return "Done — \(text.prefix(30))..."

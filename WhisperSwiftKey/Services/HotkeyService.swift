@@ -37,7 +37,7 @@ class HotkeyService {
     
     // Double-tap detection
     private var lastFnPressTime: Date?
-    private let doubleTapThreshold: TimeInterval = 0.65
+    private let doubleTapThreshold: TimeInterval = 0.4
 
     // Push-to-talk state
     private var isFnHeld = false
@@ -179,9 +179,11 @@ class HotkeyService {
         case .keyUp where keyCode == 63:
             globePressedState = false
         case .flagsChanged:
-            // Primary path on many Macs: Globe/Fn emits a modifier flag transition.
-            // We only care if this looks like the Globe/Fn key or an Fn modifier transition.
-            guard keyCode == 63 || isFnPressed || lastObservedFnPressed else { return }
+            // Only react to the physical Globe/Fn key (keyCode 63).
+            // Other keys (arrow keys, Page Up/Down, etc.) on compact keyboards also
+            // set .maskSecondaryFn in flags, which caused false positive triggers.
+            // Macs that don't report keyCode 63 are handled by the systemDefined path.
+            guard keyCode == 63 else { return }
             globePressedState = isFnPressed
         default:
             return

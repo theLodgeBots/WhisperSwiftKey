@@ -16,6 +16,7 @@ targets:
     platform: macOS
     sources:
       - WhisperSwiftKey
+      - Media.xcassets
     dependencies:
       - package: WhisperKit
     settings:
@@ -27,5 +28,7 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
     entitlements:
       path: WhisperSwiftKey/WhisperSwiftKey.entitlements
