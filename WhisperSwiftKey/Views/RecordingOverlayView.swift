@@ -373,3 +373,114 @@ struct RecordingOverlayContent: View {
         .padding(6)
     }
 }
+
+// MARK: - Model Loading Overlay (Full-screen centered panel)
+
+class ModelLoadingOverlayController {
+    private var window: NSPanel?
+
+    @MainActor
+    func show(modelDisplayName: String, progress: Double, phase: String, storagePath: String) {
+        if window == nil {
+            let panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+                styleMask: [.nonactivatingPanel, .borderless],
+                backing: .buffered,
+                defer: false
+            )
+            panel.isFloatingPanel = true
+            panel.isMovableByWindowBackground = false
+            panel.level = .statusBar
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.hasShadow = false
+            panel.titleVisibility = .hidden
+            panel.titlebarAppearsTransparent = true
+            panel.ignoresMouseEvents = true
+            panel.hidesOnDeactivate = false
+
+            window = panel
+        }
+
+        let content = ModelLoadingOverlayContent(
+            modelDisplayName: modelDisplayName,
+            progress: progress,
+            phase: phase,
+            storagePath: storagePath
+        )
+        window?.contentView = NSHostingView(rootView: content)
+        window?.contentView?.layoutSubtreeIfNeeded()
+        centerOnScreen()
+        window?.orderFrontRegardless()
+    }
+
+    @MainActor
+    func dismiss() {
+        window?.orderOut(nil)
+    }
+
+    @MainActor
+    private func centerOnScreen() {
+        guard let window, let screen = NSScreen.main else { return }
+        let screenFrame = screen.visibleFrame
+        let x = screenFrame.midX - window.frame.width / 2
+        let y = screenFrame.midY - window.frame.height / 2
+        window.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+}
+
+struct ModelLoadingOverlayContent: View {
+    let modelDisplayName: String
+    let progress: Double
+    let phase: String
+    let storagePath: String
+
+    var body: some View {
+        VStack(spacing: 16) {
+            // Model name
+            Text(modelDisplayName)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.white)
+
+            // Progress bar with percentage
+            VStack(spacing: 6) {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .tint(.accentColor)
+
+                HStack {
+                    Text(phase)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.8))
+                    Spacer()
+                    Text("\(Int(progress * 100))%")
+                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+            }
+
+            // Storage path (truncated caption)
+            HStack(spacing: 4) {
+                Image(systemName: "folder")
+                    .font(.system(size: 10))
+                Text(storagePath)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .font(.system(size: 10))
+            .foregroundStyle(.white.opacity(0.4))
+        }
+        .padding(28)
+        .frame(width: 400)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(.black.opacity(0.88))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .strokeBorder(.white.opacity(0.1), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.4), radius: 20, y: 8)
+        )
+    }
+}

@@ -231,12 +231,41 @@ struct GeneralSettingsView: View {
 
 struct ModelsSettingsView: View {
     @EnvironmentObject var appState: AppState
-    
+    @State private var modelToDelete: String?
+
+    private var totalDownloadedSize: Int64 {
+        WhisperService.availableModels.compactMap {
+            appState.whisperService.downloadedModelSize($0.name)
+        }.reduce(0, +)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Whisper Models")
                 .font(.headline)
-            
+
+            // Storage path with Open in Finder button
+            HStack(spacing: 6) {
+                Image(systemName: "folder")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text(appState.whisperService.modelStorageURL.path)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Button {
+                    let url = appState.whisperService.modelStorageURL
+                    // Create directory if it doesn't exist so Finder can open it
+                    try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                    NSWorkspace.shared.open(url)
+                } label: {
+                    Text("Open in Finder")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+            }
+
             HStack(spacing: 4) {
                 Text("Models are downloaded from HuggingFace on first use.")
                     .font(.caption)
@@ -246,75 +275,179 @@ struct ModelsSettingsView: View {
                         .font(.caption)
                 }
             }
-            
+
             List {
                 ForEach(WhisperService.availableModels) { model in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(model.displayName)
-                                    .font(.headline)
-                                if model.recommended {
-                                    Text("Recommended")
-                                        .font(.caption2)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(Color.accentColor.opacity(0.2))
-                                        .cornerRadius(4)
-                                }
-                                if appState.selectedModel == model.name {
-                                    Text("Active")
-                                        .font(.caption2)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(Color.green.opacity(0.2))
-                                        .cornerRadius(4)
-                                }
-                                Link(destination: URL(string: "https://huggingface.co/argmaxinc/whisperkit-coreml/tree/main/\(model.name)")!) {
-                                    Image(systemName: "link")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                                .help("View on HuggingFace")
-                            }
-                            
-                            HStack(spacing: 12) {
-                                Label(ByteCountFormatter.string(fromByteCount: model.sizeBytes, countStyle: .file), systemImage: "internaldrive")
-                                HStack(spacing: 2) {
-                                    Image(systemName: "star.fill")
-                                    Text("\(model.qualityRating)/5")
-                                }
-                                HStack(spacing: 2) {
-                                    Image(systemName: "bolt.fill")
-                                    Text("\(model.speedRating)/5")
-                                }
-                            }
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        }
-                        
-                        Spacer()
-                        
-                        if appState.whisperService.isDownloading && appState.selectedModel == model.name {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else if appState.selectedModel == model.name {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.accentColor)
-                        } else {
-                            Button("Select") {
-                                appState.selectedModel = model.name
-                                Task {
-                                    try? await appState.whisperService.loadModel(model.name)
-                                }
-                            }
-                        }
-                    }
-                    .padding(.vertical, 4)
+                    ModelRowView(model: model, modelToDelete: $modelToDelete)
+                        .environmentObject(appState)
                 }
+            }
+
+            // Total storage at bottom
+            HStack {
+                if totalDownloadedSize > 0 {
+                    Text("Total storage: \(ByteCountFormatter.string(fromByteCount: totalDownloadedSize, countStyle: .file))")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
             }
         }
         .padding()
+        .alert("Delete Model?", isPresented: Binding(
+            get: { modelToDelete != nil },
+            set: { if !$0 { modelToDelete = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { modelToDelete = nil }
+            Button("Delete", role: .destructive) {
+                if let name = modelToDelete {
+                    try? appState.whisperService.deleteModel(name)
+                    modelToDelete = nil
+                }
+            }
+        } message: {
+            if let name = modelToDelete,
+               let displayName = WhisperService.availableModels.first(where: { $0.name == name })?.displayName {
+                Text("This will remove the \(displayName) model files from disk. You can re-download it later.")
+            }
+        }
+    }
+}
+
+struct ModelRowView: View {
+    @EnvironmentObject var appState: AppState
+    let model: WhisperService.ModelInfo
+    @Binding var modelToDelete: String?
+
+    private var isDownloaded: Bool {
+        appState.whisperService.isModelDownloaded(model.name)
+    }
+
+    private var diskSize: Int64? {
+        appState.whisperService.downloadedModelSize(model.name)
+    }
+
+    private var isActivelyDownloading: Bool {
+        appState.whisperService.isDownloading && appState.selectedModel == model.name
+    }
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(model.displayName)
+                        .font(.headline)
+                    if model.recommended {
+                        Text("Recommended")
+                            .font(.caption2)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.accentColor.opacity(0.2))
+                            .cornerRadius(4)
+                    }
+                    if appState.selectedModel == model.name {
+                        Text("Active")
+                            .font(.caption2)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.green.opacity(0.2))
+                            .cornerRadius(4)
+                    }
+                    // Downloaded / Not downloaded badge
+                    if isDownloaded {
+                        Text("Downloaded")
+                            .font(.caption2)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.green.opacity(0.15))
+                            .foregroundColor(.green)
+                            .cornerRadius(4)
+                    } else if !isActivelyDownloading {
+                        Text("Not downloaded")
+                            .font(.caption2)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.gray.opacity(0.15))
+                            .foregroundColor(.secondary)
+                            .cornerRadius(4)
+                    }
+                    Link(destination: URL(string: "https://huggingface.co/argmaxinc/whisperkit-coreml/tree/main/\(model.name)")!) {
+                        Image(systemName: "link")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .help("View on HuggingFace")
+                }
+
+                HStack(spacing: 12) {
+                    // Show actual disk size if downloaded, otherwise estimate
+                    if let size = diskSize {
+                        Label(ByteCountFormatter.string(fromByteCount: size, countStyle: .file), systemImage: "internaldrive")
+                    } else {
+                        Label("~\(ByteCountFormatter.string(fromByteCount: model.sizeBytes, countStyle: .file))", systemImage: "internaldrive")
+                    }
+                    HStack(spacing: 2) {
+                        Image(systemName: "star.fill")
+                        Text("\(model.qualityRating)/5")
+                    }
+                    HStack(spacing: 2) {
+                        Image(systemName: "bolt.fill")
+                        Text("\(model.speedRating)/5")
+                    }
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+                // Real progress bar when downloading
+                if isActivelyDownloading {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ProgressView(value: appState.whisperService.downloadProgress)
+                            .progressViewStyle(.linear)
+                        HStack {
+                            Text(appState.whisperService.loadingPhase)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text("\(Int(appState.whisperService.downloadProgress * 100))%")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+            }
+
+            Spacer()
+
+            HStack(spacing: 8) {
+                // Delete button for downloaded models
+                if isDownloaded && appState.selectedModel != model.name {
+                    Button {
+                        modelToDelete = model.name
+                    } label: {
+                        Image(systemName: "trash")
+                            .foregroundColor(.red.opacity(0.7))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Delete downloaded model")
+                }
+
+                if isActivelyDownloading {
+                    ProgressView()
+                        .controlSize(.small)
+                } else if appState.selectedModel == model.name {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.accentColor)
+                } else {
+                    Button("Select") {
+                        appState.selectedModel = model.name
+                        Task {
+                            try? await appState.whisperService.loadModel(model.name)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 

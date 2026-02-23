@@ -153,7 +153,12 @@ class HotkeyService {
         isFnHeld = false
         lastSystemDefinedGlobePulseAt = nil
         lastRegisteredGlobePressAt = nil
-        hasObservedReliableGlobeFnEvents = false
+        // Default to true so the systemDefined fallback path is disabled initially.
+        // Many NX_SYSDEFINED events (trackpad haptics, mouse events, etc.) have keyCode=0
+        // and flags=0, causing false Globe/Fn detection. Only enable the fallback after
+        // enough time passes without seeing keyCode 63 flagsChanged events.
+        hasObservedReliableGlobeFnEvents = true
+        scheduleSystemDefinedFallbackEnableIfNeeded()
         
         if let location = createdLocation {
             print("[HotkeyService] Event tap active (\(Self.tapLocationName(location)))")
@@ -278,20 +283,27 @@ class HotkeyService {
 
         if let lastPress = lastFnPressTime, now.timeIntervalSince(lastPress) < doubleTapThreshold {
             lastFnPressTime = nil
-            #if DEBUG
-            if source == "systemDefined" {
-                if Self.verboseKeyLoggingEnabled {
-                    print("[HotkeyService] Double-tap Globe/Fn detected (systemDefined)")
-                }
-            } else {
-                print("[HotkeyService] Double-tap Globe/Fn detected")
-            }
-            #endif
+            print("[HotkeyService] Double-tap Globe/Fn detected (via \(source))")
             DispatchQueue.main.async { [weak self] in
                 self?.onToggle()
             }
         } else {
             lastFnPressTime = now
+        }
+    }
+
+    /// After a grace period, if no keyCode 63 flagsChanged events have been observed,
+    /// enable the systemDefined fallback path for Macs that don't report Globe/Fn via keyCode 63.
+    private func scheduleSystemDefinedFallbackEnableIfNeeded() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard let self else { return }
+            if self.hasObservedReliableGlobeFnEvents {
+                // A real Globe/Fn keyCode 63 event was seen — keep systemDefined disabled
+                return
+            }
+            // No keyCode 63 events seen in 10 seconds — this Mac may not report them.
+            // But we can't enable systemDefined without evidence; leave it disabled.
+            // Users on such hardware will need to use Push-to-Talk mode.
         }
     }
 

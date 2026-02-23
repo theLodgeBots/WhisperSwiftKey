@@ -3,7 +3,7 @@ import ApplicationServices
 
 /// Inserts transcribed text at the cursor position using Accessibility API or clipboard fallback
 class TextInsertionService {
-    
+
     // Known terminal bundle IDs that need Cmd+V instead of AX API
     private let terminalBundleIDs: Set<String> = [
         "com.apple.Terminal",
@@ -13,12 +13,12 @@ class TextInsertionService {
         "com.github.wez.wezterm",
         "com.mitchellh.ghostty",
     ]
-    
+
     func insertText(_ text: String) {
         guard !text.isEmpty else { return }
         let frontmostApp = NSWorkspace.shared.frontmostApplication
         let bundleID = frontmostApp?.bundleIdentifier ?? ""
-        
+
         if terminalBundleIDs.contains(bundleID) {
             insertViaClipboard(text)
         } else if !insertViaAccessibilityAtCursor(text) {
@@ -30,6 +30,31 @@ class TextInsertionService {
     func insertIncrementalText(_ text: String) {
         guard !text.isEmpty else { return }
         insertViaClipboard(text)
+    }
+
+    /// Replace a known placeholder (e.g. "...") or short streaming text with the final transcription.
+    /// Uses AX replace first; if that fails, safely falls back to keyboard backspaces + paste
+    /// since we know exactly what text we inserted and how long it is.
+    func replacePlaceholderText(_ previousText: String, with newText: String) {
+        guard !previousText.isEmpty else {
+            insertIncrementalText(newText)
+            return
+        }
+
+        let frontmostApp = NSWorkspace.shared.frontmostApplication
+        let bundleID = frontmostApp?.bundleIdentifier ?? ""
+
+        if terminalBundleIDs.contains(bundleID) {
+            replaceViaKeyboard(previousText: previousText, newText: newText)
+            return
+        }
+
+        if !replaceTrailingTextViaAccessibility(previousText: previousText, newText: newText) {
+            // AX failed — safe to use keyboard backspaces since we know the exact
+            // placeholder text we inserted (e.g. "...") is right before the caret.
+            print("[TextInsertionService] AX replace failed for placeholder, using keyboard fallback")
+            replaceViaKeyboard(previousText: previousText, newText: newText)
+        }
     }
 
     /// Replace the most recently inserted dictation text with updated text (Siri-like provisional update).
@@ -48,10 +73,13 @@ class TextInsertionService {
         }
 
         if !replaceTrailingTextViaAccessibility(previousText: previousText, newText: newText) {
-            replaceViaKeyboard(previousText: previousText, newText: newText)
+            // AX replace failed. Only use keyboard backspaces in terminals (above).
+            // For other apps, skip rather than sending blind backspaces that could
+            // delete existing document content.
+            print("[TextInsertionService] AX replace failed, skipping keyboard fallback to protect document content")
         }
     }
-    
+
     /// Try inserting via Accessibility API at the caret/selection (Siri-like behavior).
     /// Falls back to clipboard paste if the app does not expose the required AX text attributes.
     private func insertViaAccessibilityAtCursor(_ text: String) -> Bool {
@@ -97,20 +125,20 @@ class TextInsertionService {
 
         return true
     }
-    
+
     /// Fallback: copy to clipboard and simulate Cmd+V
     private func insertViaClipboard(_ text: String) {
         // Save current clipboard
         let pasteboard = NSPasteboard.general
         let previousContents = pasteboard.string(forType: .string)
-        
+
         // Set our text
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
-        
+
         // Simulate Cmd+V
         simulateKeyPress(keyCode: 9, flags: .maskCommand) // 'V' key
-        
+
         // Restore clipboard after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             if let previous = previousContents {
@@ -185,28 +213,28 @@ class TextInsertionService {
         }
         return true
     }
-    
+
     private func getFocusedElement(_ systemElement: AXUIElement) -> AXUIElement? {
         var focusedApp: CFTypeRef?
         guard AXUIElementCopyAttributeValue(systemElement, kAXFocusedApplicationAttribute as CFString, &focusedApp) == .success else {
             return nil
         }
-        
+
         var focusedElement: CFTypeRef?
         guard AXUIElementCopyAttributeValue(focusedApp as! AXUIElement, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success else {
             return nil
         }
-        
+
         return focusedElement as! AXUIElement?
     }
-    
+
     private func simulateKeyPress(keyCode: CGKeyCode, flags: CGEventFlags) {
         let source = CGEventSource(stateID: .hidSystemState)
-        
+
         let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true)
         keyDown?.flags = flags
         keyDown?.post(tap: .cghidEventTap)
-        
+
         let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
         keyUp?.flags = flags
         keyUp?.post(tap: .cghidEventTap)

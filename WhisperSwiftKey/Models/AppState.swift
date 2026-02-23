@@ -60,6 +60,7 @@ final class AppState: ObservableObject {
     let whisperService = WhisperService()
     let textInsertionService = TextInsertionService()
     private let recordingOverlayController = RecordingOverlayController()
+    private let modelLoadingOverlayController = ModelLoadingOverlayController()
 
     var hotkeyService: HotkeyService?
 
@@ -186,19 +187,22 @@ final class AppState: ObservableObject {
 
     func startRecording() {
         guard !isRecording else { return }
+        // Don't start a new load if one is already in progress
+        if case .loadingModel = transcriptionState { return }
+        print("[AppState] startRecording() called, modelLoaded=\(whisperService.isModelLoaded)")
 
-        if whisperService.isModelAsleep {
+        if !whisperService.isModelLoaded {
             transcriptionState = .loadingModel
             let sessionID = UUID()
             liveDictationSessionID = sessionID
             Task { [weak self] in
                 guard let self else { return }
                 do {
-                    try await self.whisperService.wakeModel()
+                    try await self.whisperService.ensureModelLoaded(self.selectedModel)
                 } catch {
                     await MainActor.run {
                         guard self.liveDictationSessionID == sessionID else { return }
-                        self.transcriptionState = .error("Failed to wake model: \(error.localizedDescription)")
+                        self.transcriptionState = .error("Failed to load model: \(error.localizedDescription)")
                     }
                     return
                 }
@@ -231,8 +235,8 @@ final class AppState: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.whisperService.startRealtimeTranscription(language: language, prompt: prompt) { [weak self] text in
-                    self?.handleRealtimeStreamingPartialText(text, sessionID: sessionID)
+                try await self.whisperService.startRealtimeTranscription(language: language, prompt: prompt) { [weak self] (confirmedText: String, displayText: String) in
+                    self?.handleRealtimeStreamingPartialText(confirmedText: confirmedText, displayText: displayText, sessionID: sessionID)
                 }
                 await MainActor.run {
                     guard self.liveDictationSessionID == sessionID, self.isRecording else { return }
@@ -300,6 +304,11 @@ final class AppState: ObservableObject {
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
+            // If streaming inserted placeholder but final result is empty (e.g. hallucination filtered),
+            // remove the placeholder from the document.
+            if !insertedPrefix.isEmpty {
+                textInsertionService.replacePlaceholderText(insertedPrefix, with: "")
+            }
             transcriptionState = .error("No speech detected")
             return
         }
@@ -380,23 +389,28 @@ final class AppState: ObservableObject {
         startLiveDictationLoopIfNeeded()
     }
 
-    private func handleRealtimeStreamingPartialText(_ text: String, sessionID: UUID) {
+    private func handleRealtimeStreamingPartialText(confirmedText: String, displayText: String, sessionID: UUID) {
         guard sessionID == liveDictationSessionID else { return }
         guard isRecording else { return }
 
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        let trimmedDisplay = displayText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmedDisplay.isEmpty else { return }
+
+        // Skip hallucinations and their prefixes (e.g. "Thank" growing into "Thank you.")
+        guard !WhisperService.isLikelyHallucination(trimmedDisplay) else { return }
 
         liveDictationHasSeenSpeechEnergy = true
-        liveDictationLastPartialText = trimmed
-        lastTranscription = trimmed
+        liveDictationLastPartialText = trimmedDisplay
+        // Show full text (confirmed + unconfirmed) in the overlay/menu
+        lastTranscription = trimmedDisplay
 
-        if autoInsertText {
-            liveDictationInsertedText = applyDictationInsertion(
-                transcript: trimmed,
-                previouslyInsertedText: liveDictationInsertedText,
-                finalResult: false
-            )
+        // Insert "..." placeholder in the document when speech first appears.
+        // Don't insert streaming text (it revises constantly). The final transcription
+        // will replace "..." with the polished result.
+        if autoInsertText && liveDictationInsertedText.isEmpty {
+            textInsertionService.insertIncrementalText("...")
+            liveDictationInsertedText = "..."
         }
     }
 
@@ -480,15 +494,16 @@ final class AppState: ObservableObject {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
+        // Skip hallucinations and their prefixes (e.g. "Thank" growing into "Thank you.")
+        guard !WhisperService.isLikelyHallucination(trimmed) else { return }
+
         liveDictationLastPartialText = trimmed
         lastTranscription = trimmed
 
-        if autoInsertText {
-            liveDictationInsertedText = applyDictationInsertion(
-                transcript: trimmed,
-                previouslyInsertedText: liveDictationInsertedText,
-                finalResult: false
-            )
+        // Insert "..." placeholder when speech first appears (buffered dictation path).
+        if autoInsertText && liveDictationInsertedText.isEmpty {
+            textInsertionService.insertIncrementalText("...")
+            liveDictationInsertedText = "..."
         }
     }
 
@@ -500,12 +515,70 @@ final class AppState: ObservableObject {
         }
     }
 
+    private static let deltaStripPunctuation: (String) -> String = { s in
+        String(s.unicodeScalars.filter {
+            CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0)
+        })
+    }
+
     private func liveDictationDeltaToAppend(fullTranscript: String, insertedPrefix: String) -> String? {
         guard !fullTranscript.isEmpty else { return nil }
         guard !insertedPrefix.isEmpty else { return fullTranscript }
         guard fullTranscript.count >= insertedPrefix.count else { return nil }
-        guard fullTranscript.hasPrefix(insertedPrefix) else { return nil }
-        return String(fullTranscript.dropFirst(insertedPrefix.count))
+
+        // 1. Exact prefix match
+        if fullTranscript.hasPrefix(insertedPrefix) {
+            let delta = String(fullTranscript.dropFirst(insertedPrefix.count))
+            return delta.isEmpty ? nil : delta
+        }
+
+        // 2. Case-insensitive prefix match
+        if fullTranscript.lowercased().hasPrefix(insertedPrefix.lowercased()) {
+            let delta = String(fullTranscript.dropFirst(insertedPrefix.count))
+            return delta.isEmpty ? nil : delta
+        }
+
+        let strip = Self.deltaStripPunctuation
+        let insertedWords = insertedPrefix
+            .split(separator: " ", omittingEmptySubsequences: true)
+            .map { strip(String($0)).lowercased() }
+            .filter { !$0.isEmpty }
+        let transcriptTokens = fullTranscript
+            .split(separator: " ", omittingEmptySubsequences: true)
+        let transcriptWords = transcriptTokens
+            .map { strip(String($0)).lowercased() }
+
+        guard !insertedWords.isEmpty, transcriptWords.count > insertedWords.count else { return nil }
+
+        // 3. Word-based prefix match: Whisper changed punctuation but kept the same words
+        let allWordsMatch = insertedWords.count <= transcriptWords.count &&
+            insertedWords.enumerated().allSatisfy { i, w in transcriptWords[i] == w }
+        if allWordsMatch {
+            let newTokens = transcriptTokens[insertedWords.count...]
+            return " " + newTokens.joined(separator: " ")
+        }
+
+        // 4. Suffix anchor match: Whisper added/removed words in the middle.
+        //    Find the last few words of our inserted text somewhere in the transcript,
+        //    then take everything after that point as new content.
+        let maxAnchorLen = min(insertedWords.count, 4)
+        for anchorLen in stride(from: maxAnchorLen, through: 2, by: -1) {
+            let anchor = Array(insertedWords.suffix(anchorLen))
+            // Search transcript from right to left for this anchor
+            let searchEnd = transcriptWords.count - anchorLen
+            guard searchEnd >= 0 else { continue }
+            for i in stride(from: searchEnd, through: 0, by: -1) {
+                let candidate = Array(transcriptWords[i..<(i + anchorLen)])
+                if anchor == candidate {
+                    let newStart = i + anchorLen
+                    guard newStart < transcriptTokens.count else { return nil }
+                    let newTokens = transcriptTokens[newStart...]
+                    return " " + newTokens.joined(separator: " ")
+                }
+            }
+        }
+
+        return nil
     }
 
     private func rmsEnergy<S: Sequence>(_ samples: S) -> Float where S.Element == Float {
@@ -547,9 +620,14 @@ final class AppState: ObservableObject {
             return previouslyInsertedText + delta
         }
 
-        // Whisper partials may revise earlier words. Treat current insertion as provisional and replace it.
-        textInsertionService.replaceRecentlyInsertedText(previouslyInsertedText, with: trimmed)
-        return trimmed
+        if finalResult {
+            // Final result: replace the placeholder/streaming text with the polished transcript.
+            textInsertionService.replacePlaceholderText(previouslyInsertedText, with: trimmed)
+            return trimmed
+        }
+
+        // Streaming partial: no new content to append. Keep tracker in sync with the document.
+        return previouslyInsertedText
     }
 
     private func ensureHotkeyService() {
@@ -599,6 +677,17 @@ final class AppState: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Subscribe to whisperService download progress/phase changes to update loading overlay
+        whisperService.$downloadProgress
+            .combineLatest(whisperService.$loadingPhase)
+            .sink { [weak self] _, _ in
+                guard let self else { return }
+                if case .loadingModel = self.transcriptionState {
+                    self.updateRecordingOverlay(state: .loadingModel, showOverlay: self.showOverlay)
+                }
+            }
+            .store(in: &cancellables)
+
         NSWorkspace.shared.notificationCenter
             .publisher(for: NSWorkspace.didActivateApplicationNotification)
             .sink { [weak self] notification in
@@ -610,13 +699,27 @@ final class AppState: ObservableObject {
     private func updateRecordingOverlay(state: TranscriptionState, showOverlay: Bool) {
         guard showOverlay else {
             recordingOverlayController.dismiss()
+            modelLoadingOverlayController.dismiss()
             return
         }
 
         switch state {
-        case .recording, .loadingModel:
+        case .loadingModel:
+            // Use the big centered loading overlay instead of the small capsule
+            recordingOverlayController.dismiss()
+            let displayName = WhisperService.availableModels
+                .first(where: { $0.name == selectedModel })?.displayName ?? selectedModel
+            modelLoadingOverlayController.show(
+                modelDisplayName: displayName,
+                progress: whisperService.downloadProgress,
+                phase: whisperService.loadingPhase,
+                storagePath: whisperService.modelStorageURL.path
+            )
+        case .recording:
+            modelLoadingOverlayController.dismiss()
             recordingOverlayController.show(state: state, modelName: whisperService.currentModelName)
         default:
+            modelLoadingOverlayController.dismiss()
             recordingOverlayController.dismiss()
         }
     }
