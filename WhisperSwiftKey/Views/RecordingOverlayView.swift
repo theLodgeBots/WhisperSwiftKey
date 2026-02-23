@@ -111,7 +111,7 @@ struct RecordingOverlayContent: View {
     
     private var statusText: String {
         switch state {
-        case .recording: return "Recording..."
+        case .recording: return "Dictating..."
         case .processing: return "Transcribing..."
         case .done(let text): return String(text.prefix(40))
         case .error(let msg): return msg

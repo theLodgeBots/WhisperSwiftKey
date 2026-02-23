@@ -5,6 +5,9 @@ import WhisperKit
 @MainActor
 class WhisperService: ObservableObject {
     private var whisperKit: WhisperKit?
+    private var realtimeTranscriber: AudioStreamTranscriber?
+    private var realtimeTranscriberTask: Task<Void, Never>?
+    private var realtimeSessionID = UUID()
     
     @Published var isModelLoaded = false
     @Published var isDownloading = false
@@ -90,6 +93,125 @@ class WhisperService: ObservableObject {
         
         print("[WhisperService] Transcribed: \(text.prefix(100))")
         return text
+    }
+
+    func startRealtimeTranscription(
+        language: String? = nil,
+        prompt: String? = nil,
+        onTextUpdate: @escaping @MainActor (String) -> Void
+    ) async throws {
+        guard let kit = whisperKit else {
+            throw WhisperSwiftKeyError.modelNotLoaded
+        }
+        guard let tokenizer = kit.tokenizer else {
+            throw WhisperSwiftKeyError.modelNotLoaded
+        }
+
+        await stopRealtimeTranscription()
+
+        kit.audioProcessor.stopRecording()
+        kit.audioProcessor.purgeAudioSamples(keepingLast: 0)
+
+        var promptTokens: [Int]? = nil
+        if let prompt, !prompt.isEmpty {
+            let encoded = tokenizer.encode(text: prompt)
+            if !encoded.isEmpty {
+                promptTokens = encoded
+            }
+        }
+
+        let options = DecodingOptions(
+            language: language,
+            usePrefillPrompt: true,
+            promptTokens: promptTokens
+        )
+
+        let sessionID = UUID()
+        realtimeSessionID = sessionID
+
+        let transcriber = AudioStreamTranscriber(
+            audioEncoder: kit.audioEncoder,
+            featureExtractor: kit.featureExtractor,
+            segmentSeeker: kit.segmentSeeker,
+            textDecoder: kit.textDecoder,
+            tokenizer: tokenizer,
+            audioProcessor: kit.audioProcessor,
+            decodingOptions: options
+        ) { [weak self] oldState, newState in
+            guard let self else { return }
+            guard oldState.currentText != newState.currentText ||
+                    oldState.unconfirmedSegments != newState.unconfirmedSegments ||
+                    oldState.confirmedSegments != newState.confirmedSegments
+            else {
+                return
+            }
+
+            let transcript = Self.realtimeTranscriptText(from: newState)
+            guard !transcript.isEmpty else { return }
+            Task { @MainActor in
+                guard self.realtimeSessionID == sessionID else { return }
+                onTextUpdate(transcript)
+            }
+        }
+
+        realtimeTranscriber = transcriber
+        realtimeTranscriberTask = Task { [weak self] in
+            do {
+                try await transcriber.startStreamTranscription()
+            } catch {
+                print("[WhisperService] Realtime transcription failed: \(error.localizedDescription)")
+            }
+            await MainActor.run {
+                guard let self else { return }
+                if self.realtimeSessionID == sessionID {
+                    self.realtimeTranscriberTask = nil
+                }
+            }
+        }
+    }
+
+    func stopRealtimeTranscription() async {
+        let sessionID = UUID()
+        realtimeSessionID = sessionID
+
+        if let transcriber = realtimeTranscriber {
+            await transcriber.stopStreamTranscription()
+        }
+        realtimeTranscriber = nil
+        realtimeTranscriberTask?.cancel()
+        realtimeTranscriberTask = nil
+    }
+
+    func stopRealtimeTranscriptionAndCaptureSamples() async -> [Float]? {
+        await stopRealtimeTranscription()
+        return currentRealtimeCapturedSamples()
+    }
+
+    func currentRealtimeCapturedSamples() -> [Float]? {
+        guard let kit = whisperKit else { return nil }
+        let samples = Array(kit.audioProcessor.audioSamples)
+        return samples.isEmpty ? nil : samples
+    }
+
+    private static func realtimeTranscriptText(from state: AudioStreamTranscriber.State) -> String {
+        let confirmed = state.confirmedSegments.map(\.text).joined()
+        let unconfirmedSegmentsText = state.unconfirmedSegments.map(\.text).joined()
+
+        let currentText: String
+        if state.currentText == "Waiting for speech..." {
+            currentText = ""
+        } else {
+            currentText = state.currentText
+        }
+
+        let suffix: String
+        if currentText.count >= unconfirmedSegmentsText.count {
+            suffix = currentText
+        } else {
+            suffix = unconfirmedSegmentsText
+        }
+
+        return (confirmed + suffix).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

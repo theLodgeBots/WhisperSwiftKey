@@ -10,8 +10,9 @@ struct WhisperSwiftKeyApp: App {
             MenuBarView()
                 .environmentObject(appState)
         } label: {
-            Image(systemName: appState.isRecording ? "mic.fill" : "mic")
+            Image(systemName: menuBarIconName)
                 .symbolEffect(.pulse, isActive: appState.isRecording)
+                .symbolEffect(.bounce, value: appState.hotkeyFeedbackCount)
         }
         
         Settings {
@@ -27,5 +28,12 @@ struct WhisperSwiftKeyApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
         .defaultPosition(.center)
+    }
+
+    private var menuBarIconName: String {
+        if appState.hotkeyFeedbackActive {
+            return "keyboard"
+        }
+        return appState.isRecording ? "mic.fill" : "mic"
     }
 }

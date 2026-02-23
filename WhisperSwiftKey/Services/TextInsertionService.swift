@@ -15,26 +15,87 @@ class TextInsertionService {
     ]
     
     func insertText(_ text: String) {
+        guard !text.isEmpty else { return }
         let frontmostApp = NSWorkspace.shared.frontmostApplication
         let bundleID = frontmostApp?.bundleIdentifier ?? ""
         
         if terminalBundleIDs.contains(bundleID) {
             insertViaClipboard(text)
-        } else if !insertViaAccessibility(text) {
+        } else if !insertViaAccessibilityAtCursor(text) {
             insertViaClipboard(text)
         }
     }
+
+    /// Insert incremental dictation text at the cursor. Uses paste to avoid replacing full field contents.
+    func insertIncrementalText(_ text: String) {
+        guard !text.isEmpty else { return }
+        insertViaClipboard(text)
+    }
+
+    /// Replace the most recently inserted dictation text with updated text (Siri-like provisional update).
+    func replaceRecentlyInsertedText(_ previousText: String, with newText: String) {
+        guard !previousText.isEmpty else {
+            insertIncrementalText(newText)
+            return
+        }
+
+        let frontmostApp = NSWorkspace.shared.frontmostApplication
+        let bundleID = frontmostApp?.bundleIdentifier ?? ""
+
+        if terminalBundleIDs.contains(bundleID) {
+            replaceViaKeyboard(previousText: previousText, newText: newText)
+            return
+        }
+
+        if !replaceTrailingTextViaAccessibility(previousText: previousText, newText: newText) {
+            replaceViaKeyboard(previousText: previousText, newText: newText)
+        }
+    }
     
-    /// Try inserting via Accessibility API (preferred — doesn't touch clipboard)
-    private func insertViaAccessibility(_ text: String) -> Bool {
+    /// Try inserting via Accessibility API at the caret/selection (Siri-like behavior).
+    /// Falls back to clipboard paste if the app does not expose the required AX text attributes.
+    private func insertViaAccessibilityAtCursor(_ text: String) -> Bool {
         guard let systemElement = AXUIElementCreateSystemWide() as AXUIElement?,
               let focusedElement = getFocusedElement(systemElement) else {
             return false
         }
-        
-        let value = text as CFTypeRef
-        let result = AXUIElementSetAttributeValue(focusedElement, kAXValueAttribute as CFString, value)
-        return result == .success
+
+        var currentValueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(focusedElement, kAXValueAttribute as CFString, &currentValueRef) == .success,
+              let currentValue = currentValueRef as? String else {
+            return false
+        }
+
+        var selectedRangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(focusedElement, kAXSelectedTextRangeAttribute as CFString, &selectedRangeRef) == .success,
+              let axRangeValue = selectedRangeRef,
+              CFGetTypeID(axRangeValue) == AXValueGetTypeID() else {
+            return false
+        }
+
+        let rangeValue = axRangeValue as! AXValue
+        var selectedRange = CFRange(location: 0, length: 0)
+        guard AXValueGetValue(rangeValue, .cfRange, &selectedRange) else {
+            return false
+        }
+
+        let nsCurrentValue = currentValue as NSString
+        let safeLocation = max(0, min(selectedRange.location, nsCurrentValue.length))
+        let safeLength = max(0, min(selectedRange.length, nsCurrentValue.length - safeLocation))
+        let replacementRange = NSRange(location: safeLocation, length: safeLength)
+
+        let updatedValue = nsCurrentValue.replacingCharacters(in: replacementRange, with: text)
+        let setResult = AXUIElementSetAttributeValue(focusedElement, kAXValueAttribute as CFString, updatedValue as CFTypeRef)
+        guard setResult == .success else {
+            return false
+        }
+
+        var newCaret = CFRange(location: safeLocation + (text as NSString).length, length: 0)
+        if let caretValue = AXValueCreate(.cfRange, &newCaret) {
+            _ = AXUIElementSetAttributeValue(focusedElement, kAXSelectedTextRangeAttribute as CFString, caretValue)
+        }
+
+        return true
     }
     
     /// Fallback: copy to clipboard and simulate Cmd+V
@@ -57,6 +118,72 @@ class TextInsertionService {
                 pasteboard.setString(previous, forType: .string)
             }
         }
+    }
+
+    private func replaceViaKeyboard(previousText: String, newText: String) {
+        let deleteCount = max(0, (previousText as NSString).length)
+        for _ in 0..<deleteCount {
+            simulateKeyPress(keyCode: 51, flags: []) // Delete (backspace)
+        }
+        if !newText.isEmpty {
+            insertViaClipboard(newText)
+        }
+    }
+
+    /// Attempts to replace the text immediately before the caret, if it matches the previous provisional dictation text.
+    /// Uses AX only to validate/select the range, then pastes over the selection to preserve rich-text formatting.
+    private func replaceTrailingTextViaAccessibility(previousText: String, newText: String) -> Bool {
+        guard let systemElement = AXUIElementCreateSystemWide() as AXUIElement?,
+              let focusedElement = getFocusedElement(systemElement) else {
+            return false
+        }
+
+        var currentValueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(focusedElement, kAXValueAttribute as CFString, &currentValueRef) == .success,
+              let currentValue = currentValueRef as? String else {
+            return false
+        }
+
+        var selectedRangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(focusedElement, kAXSelectedTextRangeAttribute as CFString, &selectedRangeRef) == .success,
+              let axRangeValue = selectedRangeRef,
+              CFGetTypeID(axRangeValue) == AXValueGetTypeID() else {
+            return false
+        }
+
+        let rangeValue = axRangeValue as! AXValue
+        var selectedRange = CFRange(location: 0, length: 0)
+        guard AXValueGetValue(rangeValue, .cfRange, &selectedRange) else {
+            return false
+        }
+
+        // Only do provisional replacement when the caret is collapsed.
+        guard selectedRange.length == 0 else { return false }
+
+        let nsCurrentValue = currentValue as NSString
+        let oldLen = (previousText as NSString).length
+        let safeCaretLocation = max(0, min(selectedRange.location, nsCurrentValue.length))
+        guard safeCaretLocation >= oldLen else { return false }
+
+        let replacementRange = NSRange(location: safeCaretLocation - oldLen, length: oldLen)
+        let currentTrailing = nsCurrentValue.substring(with: replacementRange)
+        guard currentTrailing == previousText else { return false }
+
+        var selectionToReplace = CFRange(location: replacementRange.location, length: replacementRange.length)
+        guard let selectionValue = AXValueCreate(.cfRange, &selectionToReplace) else { return false }
+        let selectResult = AXUIElementSetAttributeValue(
+            focusedElement,
+            kAXSelectedTextRangeAttribute as CFString,
+            selectionValue
+        )
+        guard selectResult == .success else { return false }
+
+        if newText.isEmpty {
+            simulateKeyPress(keyCode: 51, flags: []) // Delete selection
+        } else {
+            insertViaClipboard(newText)
+        }
+        return true
     }
     
     private func getFocusedElement(_ systemElement: AXUIElement) -> AXUIElement? {

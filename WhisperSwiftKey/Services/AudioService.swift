@@ -72,6 +72,18 @@ class AudioService {
         
         return samples.isEmpty ? nil : samples
     }
+
+    func currentSamplesSnapshot() -> [Float] {
+        collectedSamples
+    }
+
+    var currentSampleCount: Int {
+        collectedSamples.count
+    }
+
+    var recordingActive: Bool {
+        isRecording
+    }
     
     func requestPermission(completion: @escaping (Bool) -> Void) {
         AVAudioApplication.requestRecordPermission { granted in
