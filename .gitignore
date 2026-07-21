@@ -28,3 +28,6 @@ Carthage/Build/
 .DS_Store
 *.swp
 *~
+
+# Local release exports are uploaded as GitHub Release assets, not committed.
+Distribution/
