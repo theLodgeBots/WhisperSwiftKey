@@ -8,7 +8,7 @@ options:
 packages:
   WhisperKit:
     url: https://github.com/argmaxinc/WhisperKit
-    from: "0.9.0"
+    from: "0.18.0"
 
 targets:
   WhisperSwiftKey:
@@ -24,11 +24,40 @@ targets:
         INFOPLIST_FILE: WhisperSwiftKey/Info.plist
         CODE_SIGN_ENTITLEMENTS: WhisperSwiftKey/WhisperSwiftKey.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: com.laanlabs.WhisperSwiftKey
-        MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "0.1.1"
+        CURRENT_PROJECT_VERSION: "2"
         SWIFT_VERSION: "5.9"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 34FWY7G2HB
+        PROVISIONING_PROFILE_SPECIFIER: ""
+        # Cross-application AX text editing/caret bounds are the core feature of
+        # this accessibility utility and are blocked by App Sandbox.
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_INCOMING_NETWORK_CONNECTIONS: NO
+        ENABLE_OUTGOING_NETWORK_CONNECTIONS: YES
+        ENABLE_RESOURCE_ACCESS_AUDIO_INPUT: YES
+        ENABLE_RESOURCE_ACCESS_BLUETOOTH: NO
+        ENABLE_RESOURCE_ACCESS_CALENDARS: NO
+        ENABLE_RESOURCE_ACCESS_CAMERA: NO
+        ENABLE_RESOURCE_ACCESS_CONTACTS: NO
+        ENABLE_RESOURCE_ACCESS_LOCATION: NO
+        ENABLE_RESOURCE_ACCESS_PRINTING: NO
+        ENABLE_RESOURCE_ACCESS_USB: NO
     entitlements:
       path: WhisperSwiftKey/WhisperSwiftKey.entitlements
+      properties:
+        com.apple.security.device.audio-input: true
+        com.apple.security.network.client: true
+
+  WhisperSwiftKeyTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - WhisperSwiftKeyTests
+    dependencies:
+      - target: WhisperSwiftKey
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES

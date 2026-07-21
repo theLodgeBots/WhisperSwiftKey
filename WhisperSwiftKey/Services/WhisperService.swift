@@ -8,6 +8,8 @@ class WhisperService: ObservableObject {
     private var realtimeTranscriber: AudioStreamTranscriber?
     private var realtimeTranscriberTask: Task<Void, Never>?
     private var realtimeSessionID = UUID()
+    private var realtimeCaptureActive = false
+    private var realtimeStartFailure: String?
 
     @Published var isModelLoaded = false
     @Published var isModelAsleep = false
@@ -30,9 +32,18 @@ class WhisperService: ObservableObject {
         ModelInfo(name: "openai_whisper-tiny", displayName: "Tiny", sizeBytes: 75_000_000, qualityRating: 2, speedRating: 5, recommended: false),
         ModelInfo(name: "openai_whisper-base", displayName: "Base", sizeBytes: 142_000_000, qualityRating: 3, speedRating: 4, recommended: false),
         ModelInfo(name: "openai_whisper-small", displayName: "Small", sizeBytes: 466_000_000, qualityRating: 3, speedRating: 3, recommended: false),
-        ModelInfo(name: "openai_whisper-large-v3", displayName: "Large V3", sizeBytes: 1_500_000_000, qualityRating: 5, speedRating: 2, recommended: false),
-        ModelInfo(name: "openai_whisper-large-v3_turbo", displayName: "Large V3 Turbo", sizeBytes: 800_000_000, qualityRating: 5, speedRating: 4, recommended: true),
+        ModelInfo(name: "openai_whisper-large-v3-v20240930_626MB", displayName: "Large V3 (Compressed)", sizeBytes: 626_000_000, qualityRating: 5, speedRating: 4, recommended: false),
+        ModelInfo(name: "openai_whisper-large-v3-v20240930_turbo", displayName: "Large V3 Turbo", sizeBytes: 800_000_000, qualityRating: 5, speedRating: 5, recommended: true),
     ]
+
+    static let legacyModelAliases = [
+        "openai_whisper-large-v3_turbo": "openai_whisper-large-v3-v20240930_turbo",
+        "openai_whisper-large-v3": "openai_whisper-large-v3-v20240930_626MB",
+    ]
+
+    static func currentModelName(for storedName: String) -> String {
+        legacyModelAliases[storedName] ?? storedName
+    }
 
     // MARK: - Model Storage
 
@@ -161,10 +172,14 @@ class WhisperService: ObservableObject {
     /// Ensures a model is loaded and ready, handling all states:
     /// already loaded, asleep, currently downloading, or never loaded.
     func ensureModelLoaded(_ modelName: String) async throws {
-        if isModelLoaded { return }
+        if isModelLoaded, currentModelName == modelName { return }
         if isModelAsleep {
-            try await wakeModel()
-            if isModelLoaded { return }
+            if currentModelName == modelName {
+                try await wakeModel()
+                if isModelLoaded { return }
+            } else {
+                isModelAsleep = false
+            }
         }
         // If a download is already in progress (e.g. from app launch), wait for it
         if isDownloading {
@@ -198,6 +213,7 @@ class WhisperService: ObservableObject {
         let options = DecodingOptions(
             language: language,
             usePrefillPrompt: true,
+            detectLanguage: language == nil,
             skipSpecialTokens: true,
             promptTokens: promptTokens
         )
@@ -212,12 +228,6 @@ class WhisperService: ObservableObject {
                 .map { $0.text }
                 .joined(separator: " ")
         )
-
-        // Filter out hallucinated silence artifacts
-        if Self.isHallucination(text) {
-            print("[WhisperService] Filtered hallucination: \(text)")
-            return ""
-        }
 
         print("[WhisperService] Transcribed: \(text.prefix(100))")
         return text
@@ -239,6 +249,8 @@ class WhisperService: ObservableObject {
 
         kit.audioProcessor.stopRecording()
         kit.audioProcessor.purgeAudioSamples(keepingLast: 0)
+        realtimeCaptureActive = false
+        realtimeStartFailure = nil
 
         var promptTokens: [Int]? = nil
         if let prompt, !prompt.isEmpty {
@@ -251,6 +263,7 @@ class WhisperService: ObservableObject {
         let options = DecodingOptions(
             language: language,
             usePrefillPrompt: true,
+            detectLanguage: language == nil,
             skipSpecialTokens: true,
             promptTokens: promptTokens
         )
@@ -270,38 +283,61 @@ class WhisperService: ObservableObject {
             guard let self else { return }
             guard oldState.currentText != newState.currentText ||
                     oldState.unconfirmedSegments != newState.unconfirmedSegments ||
-                    oldState.confirmedSegments != newState.confirmedSegments
+                    oldState.confirmedSegments != newState.confirmedSegments ||
+                    oldState.isRecording != newState.isRecording
             else {
                 return
             }
 
             let (confirmed, display) = Self.realtimeTranscriptTexts(from: newState)
-            guard !display.isEmpty else { return }
             Task { @MainActor in
                 guard self.realtimeSessionID == sessionID else { return }
-                onTextUpdate(confirmed, display)
+                self.realtimeCaptureActive = newState.isRecording
+                if !display.isEmpty {
+                    onTextUpdate(confirmed, display)
+                }
             }
         }
 
         realtimeTranscriber = transcriber
         realtimeTranscriberTask = Task { [weak self] in
+            var failure: String?
             do {
                 try await transcriber.startStreamTranscription()
             } catch {
+                failure = error.localizedDescription
                 print("[WhisperService] Realtime transcription failed: \(error.localizedDescription)")
             }
             await MainActor.run {
                 guard let self else { return }
                 if self.realtimeSessionID == sessionID {
+                    self.realtimeCaptureActive = false
+                    self.realtimeStartFailure = failure ?? "Microphone recording did not start."
                     self.realtimeTranscriberTask = nil
                 }
             }
         }
+
+        // AudioStreamTranscriber starts recording from its long-running task. Do not
+        // report success until its state callback confirms that capture is actually live.
+        for _ in 0..<50 {
+            if realtimeCaptureActive { return }
+            if realtimeTranscriberTask == nil {
+                throw WhisperSwiftKeyError.realtimeCaptureUnavailable(
+                    realtimeStartFailure ?? "Microphone recording did not start."
+                )
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        await stopRealtimeTranscription()
+        throw WhisperSwiftKeyError.realtimeCaptureUnavailable("Microphone recording timed out while starting.")
     }
 
     func stopRealtimeTranscription() async {
         let sessionID = UUID()
         realtimeSessionID = sessionID
+        realtimeCaptureActive = false
 
         if let transcriber = realtimeTranscriber {
             await transcriber.stopStreamTranscription()
@@ -322,6 +358,14 @@ class WhisperService: ObservableObject {
         return samples.isEmpty ? nil : samples
     }
 
+    func currentRealtimeContainsSpeech() -> Bool {
+        guard let kit = whisperKit else { return false }
+        let samples = kit.audioProcessor.audioSamples
+        let lookback = min(samples.count, 64_000) // Last four seconds at 16 kHz.
+        guard lookback > 0 else { return false }
+        return SpeechActivityDetector.containsSpeech(Array(samples.suffix(lookback)))
+    }
+
     /// Returns (confirmedText, displayText).
     /// confirmedText: only stable segments that won't be revised — safe to insert into the document.
     /// displayText: full transcript including unconfirmed/in-progress text — for overlay display only.
@@ -336,44 +380,64 @@ class WhisperService: ObservableObject {
             currentText = state.currentText
         }
 
-        let suffix: String
-        if currentText.count >= unconfirmedSegmentsText.count {
-            suffix = currentText
-        } else {
-            suffix = unconfirmedSegmentsText
-        }
-
         let cleanedConfirmed = stripWhisperTokens(confirmed)
-        let cleanedDisplay = stripWhisperTokens(confirmed + suffix)
-
-        // Filter hallucinated silence artifacts
-        if isHallucination(cleanedDisplay) { return ("", "") }
+        // currentText is the newest decoder hypothesis while decoding is active;
+        // unconfirmedSegments is the completed fallback between decoder passes.
+        let newestTail = currentText.isEmpty ? unconfirmedSegmentsText : currentText
+        let cleanedDisplay = mergeTranscriptFragments(cleanedConfirmed, newestTail)
 
         return (cleanedConfirmed, cleanedDisplay)
     }
 
-    /// Known Whisper hallucination phrases produced when decoding silence or near-silence.
-    /// Whisper Large V3 is particularly prone to these.
-    private static let whisperHallucinations: Set<String> = [
-        "thank you",
-        "thank you.",
-        "thanks for watching",
-        "thanks for watching.",
-        "thanks for watching!",
-        "subscribe",
-        "subscribe.",
-        "bye",
-        "bye.",
-        "bye bye",
-        "bye bye.",
-        "you",
-        "you.",
-        "the end",
-        "the end.",
-        "so",
-        "so.",
-        "...",
-    ]
+    /// Joins overlapping streaming hypotheses without repeating their shared words.
+    /// For example, "Hey" + "Hey, what's going on" becomes the latter unchanged.
+    static func mergeTranscriptFragments(_ prefixText: String, _ suffixText: String) -> String {
+        let prefix = stripWhisperTokens(prefixText)
+        let suffix = stripWhisperTokens(suffixText)
+        guard !prefix.isEmpty else { return suffix }
+        guard !suffix.isEmpty else { return prefix }
+
+        let prefixWords = transcriptWords(in: prefix)
+        let suffixWords = transcriptWords(in: suffix)
+        let maximumOverlap = min(prefixWords.count, suffixWords.count)
+
+        for overlap in stride(from: maximumOverlap, through: 1, by: -1) {
+            let prefixOverlap = prefixWords.suffix(overlap).map(\.normalized)
+            let suffixOverlap = suffixWords.prefix(overlap).map(\.normalized)
+            guard prefixOverlap == suffixOverlap else { continue }
+
+            // The newer hypothesis already contains the entire prefix, so prefer it;
+            // it generally has better punctuation than the earlier fragment.
+            if overlap == prefixWords.count {
+                return suffix
+            }
+
+            let lastSharedWord = suffixWords[overlap - 1]
+            let suffixRemainder = String(suffix[lastSharedWord.range.upperBound...])
+            return (prefix + suffixRemainder).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return prefix + " " + suffix
+    }
+
+    private struct TranscriptWord {
+        let normalized: String
+        let range: Range<String.Index>
+    }
+
+    private static func transcriptWords(in text: String) -> [TranscriptWord] {
+        guard let expression = try? NSRegularExpression(pattern: "[\\p{L}\\p{N}']+") else {
+            return []
+        }
+        let fullRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        return expression.matches(in: text, range: fullRange).compactMap { match in
+            guard let range = Range(match.range, in: text) else { return nil }
+            return TranscriptWord(
+                normalized: String(text[range]).lowercased(),
+                range: range
+            )
+        }
+    }
 
     /// Remove Whisper control tokens like <|startoftranscript|>, <|en|>, <|0.00|>, etc.
     private static func stripWhisperTokens(_ text: String) -> String {
@@ -386,33 +450,18 @@ class WhisperService: ObservableObject {
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Returns true if the entire text is a known Whisper hallucination (silence artifact).
-    static func isHallucination(_ text: String) -> Bool {
-        whisperHallucinations.contains(text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-
-    /// Returns true if the text is a hallucination or a growing prefix of one.
-    /// Use during streaming to catch fragments like "Thank" before they complete to "Thank you."
-    static func isLikelyHallucination(_ text: String) -> Bool {
-        let normalized = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return false }
-        if whisperHallucinations.contains(normalized) { return true }
-        // Check if text is a prefix of any known hallucination
-        for hallucination in whisperHallucinations {
-            if hallucination.hasPrefix(normalized) { return true }
-        }
-        return false
-    }
 }
 
 enum WhisperSwiftKeyError: LocalizedError {
     case modelNotLoaded
     case noAudioCaptured
+    case realtimeCaptureUnavailable(String)
 
     var errorDescription: String? {
         switch self {
         case .modelNotLoaded: return "No model loaded. Please download a model first."
         case .noAudioCaptured: return "No audio was captured."
+        case .realtimeCaptureUnavailable(let message): return message
         }
     }
 }

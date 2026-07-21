@@ -35,6 +35,26 @@ struct HotkeyVerificationEvent: Identifiable, Equatable {
     let summary: String
 }
 
+/// Allows exactly one final result to mutate the document for each recording.
+/// Repeated async callbacks for the same session are ignored after the first one.
+struct DictationFinalizationGate {
+    private(set) var pendingSessionID: UUID?
+
+    var hasPendingSession: Bool { pendingSessionID != nil }
+
+    mutating func begin(sessionID: UUID) -> Bool {
+        guard pendingSessionID == nil else { return false }
+        pendingSessionID = sessionID
+        return true
+    }
+
+    mutating func consume(sessionID: UUID) -> Bool {
+        guard pendingSessionID == sessionID else { return false }
+        pendingSessionID = nil
+        return true
+    }
+}
+
 enum HotkeyVerificationResult: Equatable {
     case none
     case listening
@@ -58,7 +78,7 @@ final class AppState: ObservableObject {
 
     let audioService = AudioService()
     let whisperService = WhisperService()
-    let textInsertionService = TextInsertionService()
+    let textInsertionService: any TextInsertionServing
     private let recordingOverlayController = RecordingOverlayController()
     private let modelLoadingOverlayController = ModelLoadingOverlayController()
 
@@ -123,13 +143,18 @@ final class AppState: ObservableObject {
     private var hotkeyVerificationTimeoutTask: Task<Void, Never>?
     private var liveDictationPollingTask: Task<Void, Never>?
     private var liveDictationTranscribeTask: Task<Void, Never>?
+    private var realtimeStartTask: Task<Void, Never>?
     private var liveDictationSessionID = UUID()
     private var liveDictationTranscribeInFlight = false
     private var liveDictationLastRequestedSampleCount = 0
     private var liveDictationInsertedText = ""
     private var liveDictationLastPartialText = ""
     private var liveDictationHasSeenSpeechEnergy = false
+    private var liveDictationTargetApplicationPID: pid_t?
     private var isUsingWhisperRealtimeStreaming = false
+    private var isPreparingWhisperRealtime = false
+    private var shouldStopPreparingWhisperRealtime = false
+    private var finalizationGate = DictationFinalizationGate()
 
     var runtimeBundleIdentifier: String {
         Bundle.main.bundleIdentifier ?? "(missing bundle identifier)"
@@ -139,12 +164,16 @@ final class AppState: ObservableObject {
         Bundle.main.bundleURL.path
     }
 
-    init() {
-        let defaults = UserDefaults.standard
+    init(
+        textInsertionService: any TextInsertionServing = TextInsertionService(),
+        defaults: UserDefaults = .standard
+    ) {
+        self.textInsertionService = textInsertionService
 
-        self.selectedModel = defaults.string(forKey: Keys.selectedModel)
+        let storedModel = defaults.string(forKey: Keys.selectedModel)
             ?? WhisperService.availableModels.first(where: \.recommended)?.name
             ?? "openai_whisper-base"
+        self.selectedModel = WhisperService.currentModelName(for: storedModel)
         self.selectedLanguage = defaults.string(forKey: Keys.selectedLanguage) ?? "auto"
         self.autoInsertText = defaults.object(forKey: Keys.autoInsertText) as? Bool ?? true
         self.showOverlay = defaults.object(forKey: Keys.showOverlay) as? Bool ?? true
@@ -163,7 +192,9 @@ final class AppState: ObservableObject {
         refreshAccessibilityPermissionStatus()
         refreshFnKeyConflictStatus()
 
-        if !selectedModel.isEmpty {
+        if !selectedModel.isEmpty,
+           ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
+           ProcessInfo.processInfo.environment["WSK_AX_SMOKE_TEST"] != "1" {
             Task {
                 try? await whisperService.loadModel(selectedModel)
             }
@@ -187,8 +218,25 @@ final class AppState: ObservableObject {
 
     func startRecording() {
         guard !isRecording else { return }
+        guard HotkeyService.hasAccessibilityPermission() else {
+            accessibilityPermissionStatus = .missing
+            HotkeyService.requestAccessibilityPermissionPrompt()
+            transcriptionState = .error(
+                "Enable Accessibility access for live dictation at the text cursor"
+            )
+            return
+        }
+        guard !finalizationGate.hasPendingSession else {
+            print("[AppState] Ignoring start while the previous dictation is finalizing")
+            return
+        }
         // Don't start a new load if one is already in progress
-        if case .loadingModel = transcriptionState { return }
+        switch transcriptionState {
+        case .loadingModel, .processing:
+            return
+        default:
+            break
+        }
         print("[AppState] startRecording() called, modelLoaded=\(whisperService.isModelLoaded)")
 
         if !whisperService.isModelLoaded {
@@ -232,20 +280,43 @@ final class AppState: ObservableObject {
             return
         }
 
-        Task { [weak self] in
+        // AudioStreamTranscriber starts capture from its own long-running task. Keep
+        // explicit preparation state so a quick key release cannot fall through to an
+        // unrelated, empty AudioService capture.
+        isPreparingWhisperRealtime = true
+        realtimeStartTask = Task { [weak self] in
             guard let self else { return }
             do {
                 try await self.whisperService.startRealtimeTranscription(language: language, prompt: prompt) { [weak self] (confirmedText: String, displayText: String) in
                     self?.handleRealtimeStreamingPartialText(confirmedText: confirmedText, displayText: displayText, sessionID: sessionID)
                 }
                 await MainActor.run {
-                    guard self.liveDictationSessionID == sessionID, self.isRecording else { return }
+                    guard self.liveDictationSessionID == sessionID else {
+                        Task { await self.whisperService.stopRealtimeTranscription() }
+                        return
+                    }
+                    self.isPreparingWhisperRealtime = false
                     self.isUsingWhisperRealtimeStreaming = true
+                    self.realtimeStartTask = nil
                     print("[AppState] Using WhisperKit realtime streaming dictation")
+                    if self.shouldStopPreparingWhisperRealtime {
+                        self.shouldStopPreparingWhisperRealtime = false
+                        self.finishRealtimeRecording()
+                    }
                 }
             } catch {
                 await MainActor.run {
-                    guard self.liveDictationSessionID == sessionID, self.isRecording else { return }
+                    guard self.liveDictationSessionID == sessionID else { return }
+                    self.isPreparingWhisperRealtime = false
+                    self.realtimeStartTask = nil
+                    if self.shouldStopPreparingWhisperRealtime {
+                        self.shouldStopPreparingWhisperRealtime = false
+                        self.endLiveDictationSession()
+                        self.textInsertionService.cancelProvisionalInsertionSession()
+                        self.transcriptionState = .error("Could not start microphone capture: \(error.localizedDescription)")
+                        return
+                    }
+                    guard self.isRecording else { return }
                     print("[AppState] Realtime streaming unavailable, falling back to buffered dictation: \(error.localizedDescription)")
                     self.startBufferedRecordingFallback(sessionID: sessionID)
                 }
@@ -254,37 +325,61 @@ final class AppState: ObservableObject {
     }
 
     func stopRecording() {
-        guard isRecording else { return }
+        guard isRecording || isPreparingWhisperRealtime else { return }
         isRecording = false
-        let insertedPrefix = liveDictationInsertedText
-        let usedRealtimeStreaming = isUsingWhisperRealtimeStreaming
-        endLiveDictationSession()
-        let language = selectedLanguage == "auto" ? nil : selectedLanguage
-        let prompt = customDictionary.isEmpty ? nil : customDictionary.joined(separator: ", ")
 
-        if usedRealtimeStreaming {
+        if isPreparingWhisperRealtime {
+            shouldStopPreparingWhisperRealtime = true
             transcriptionState = .processing
-            Task { [weak self] in
-                guard let self else { return }
-                let samples = await self.whisperService.stopRealtimeTranscriptionAndCaptureSamples()
-                await MainActor.run {
-                    self.transcribeCapturedSamples(
-                        samples,
-                        language: language,
-                        prompt: prompt,
-                        insertedPrefix: insertedPrefix
-                    )
-                }
-            }
             return
         }
 
+        if isUsingWhisperRealtimeStreaming {
+            finishRealtimeRecording()
+            return
+        }
+
+        let finalizationSessionID = liveDictationSessionID
+        guard finalizationGate.begin(sessionID: finalizationSessionID) else { return }
+        let insertedPrefix = liveDictationInsertedText
+        let language = selectedLanguage == "auto" ? nil : selectedLanguage
+        let prompt = customDictionary.isEmpty ? nil : customDictionary.joined(separator: ", ")
+        endLiveDictationSession()
         transcribeCapturedSamples(
             audioService.stopRecording(),
             language: language,
             prompt: prompt,
-            insertedPrefix: insertedPrefix
+            insertedPrefix: insertedPrefix,
+            finalizationSessionID: finalizationSessionID
         )
+    }
+
+    private func finishRealtimeRecording() {
+        let finalizationSessionID = liveDictationSessionID
+        guard finalizationGate.begin(sessionID: finalizationSessionID) else {
+            print("[AppState] Ignoring duplicate realtime finalization request")
+            return
+        }
+        let insertedPrefix = liveDictationInsertedText
+        let language = selectedLanguage == "auto" ? nil : selectedLanguage
+        let prompt = customDictionary.isEmpty ? nil : customDictionary.joined(separator: ", ")
+        isUsingWhisperRealtimeStreaming = false
+        endLiveDictationSession()
+        transcriptionState = .processing
+
+        Task { [weak self] in
+            guard let self else { return }
+            let samples = await self.whisperService.stopRealtimeTranscriptionAndCaptureSamples()
+            await MainActor.run {
+                self.transcribeCapturedSamples(
+                    samples,
+                    language: language,
+                    prompt: prompt,
+                    insertedPrefix: insertedPrefix,
+                    finalizationSessionID: finalizationSessionID
+                )
+            }
+        }
     }
 
     func fetchHistory() -> [Transcription] {
@@ -300,16 +395,17 @@ final class AppState: ObservableObject {
         text: String,
         durationSeconds: Double,
         language: String?,
-        insertedPrefix: String = ""
+        insertedPrefix: String = "",
+        finalizationSessionID: UUID
     ) {
+        guard finalizationGate.consume(sessionID: finalizationSessionID) else {
+            print("[AppState] Ignoring duplicate final transcription for session \(finalizationSessionID)")
+            return
+        }
+
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            // If streaming inserted placeholder but final result is empty (e.g. hallucination filtered),
-            // remove the placeholder from the document.
-            if !insertedPrefix.isEmpty {
-                textInsertionService.replacePlaceholderText(insertedPrefix, with: "")
-            }
-            transcriptionState = .error("No speech detected")
+            handleNoSpeechDetected()
             return
         }
 
@@ -317,7 +413,16 @@ final class AppState: ObservableObject {
         transcriptionState = .done(trimmed)
 
         if autoInsertText {
-            applyDictationInsertion(transcript: trimmed, previouslyInsertedText: insertedPrefix, finalResult: true)
+            let committed = textInsertionService.commitProvisionalText(trimmed)
+            if !committed {
+                if insertedPrefix.isEmpty {
+                    textInsertionService.insertText(trimmed)
+                } else {
+                    print("[AppState] Final transcript could not safely replace the provisional text")
+                }
+            }
+        } else {
+            textInsertionService.cancelProvisionalInsertionSession()
         }
 
         history.insert(
@@ -334,14 +439,33 @@ final class AppState: ObservableObject {
         persistHistory()
     }
 
+    private func handleNoSpeechDetected() {
+        textInsertionService.cancelProvisionalInsertionSession()
+        transcriptionState = .error("No speech detected")
+    }
+
     private func transcribeCapturedSamples(
         _ samples: [Float]?,
         language: String?,
         prompt: String?,
-        insertedPrefix: String
+        insertedPrefix: String,
+        finalizationSessionID: UUID
     ) {
+        guard finalizationGate.pendingSessionID == finalizationSessionID else {
+            print("[AppState] Ignoring stale transcription task for session \(finalizationSessionID)")
+            return
+        }
+
         guard let samples else {
+            _ = finalizationGate.consume(sessionID: finalizationSessionID)
+            textInsertionService.cancelProvisionalInsertionSession()
             transcriptionState = .error("No audio captured")
+            return
+        }
+
+        guard SpeechActivityDetector.containsSpeech(samples) else {
+            _ = finalizationGate.consume(sessionID: finalizationSessionID)
+            handleNoSpeechDetected()
             return
         }
 
@@ -356,11 +480,14 @@ final class AppState: ObservableObject {
                         text: text,
                         durationSeconds: durationSeconds,
                         language: language,
-                        insertedPrefix: insertedPrefix
+                        insertedPrefix: insertedPrefix,
+                        finalizationSessionID: finalizationSessionID
                     )
                 }
             } catch {
                 await MainActor.run {
+                    guard finalizationGate.consume(sessionID: finalizationSessionID) else { return }
+                    textInsertionService.cancelProvisionalInsertionSession()
                     transcriptionState = .error(error.localizedDescription)
                 }
             }
@@ -370,13 +497,21 @@ final class AppState: ObservableObject {
     private func beginLiveDictationSession() {
         liveDictationPollingTask?.cancel()
         liveDictationTranscribeTask?.cancel()
+        realtimeStartTask?.cancel()
         liveDictationSessionID = UUID()
         liveDictationTranscribeInFlight = false
         liveDictationLastRequestedSampleCount = 0
         liveDictationInsertedText = ""
         liveDictationLastPartialText = ""
+        lastTranscription = ""
         liveDictationHasSeenSpeechEnergy = false
         isUsingWhisperRealtimeStreaming = false
+        isPreparingWhisperRealtime = false
+        shouldStopPreparingWhisperRealtime = false
+        liveDictationTargetApplicationPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        textInsertionService.beginProvisionalInsertionSession(
+            targetApplicationPID: liveDictationTargetApplicationPID
+        )
     }
 
     private func startBufferedRecordingFallback(sessionID: UUID) {
@@ -397,21 +532,13 @@ final class AppState: ObservableObject {
 
         guard !trimmedDisplay.isEmpty else { return }
 
-        // Skip hallucinations and their prefixes (e.g. "Thank" growing into "Thank you.")
-        guard !WhisperService.isLikelyHallucination(trimmedDisplay) else { return }
+        // Do not infer silence from a handful of common words. Gate the live display
+        // on the actual microphone signal instead.
+        guard whisperService.currentRealtimeContainsSpeech() else { return }
 
         liveDictationHasSeenSpeechEnergy = true
         liveDictationLastPartialText = trimmedDisplay
-        // Show full text (confirmed + unconfirmed) in the overlay/menu
-        lastTranscription = trimmedDisplay
-
-        // Insert "..." placeholder in the document when speech first appears.
-        // Don't insert streaming text (it revises constantly). The final transcription
-        // will replace "..." with the polished result.
-        if autoInsertText && liveDictationInsertedText.isEmpty {
-            textInsertionService.insertIncrementalText("...")
-            liveDictationInsertedText = "..."
-        }
+        updateLiveDictationPreview(trimmedDisplay)
     }
 
     private func endLiveDictationSession() {
@@ -419,8 +546,12 @@ final class AppState: ObservableObject {
         liveDictationPollingTask = nil
         liveDictationTranscribeTask?.cancel()
         liveDictationTranscribeTask = nil
+        realtimeStartTask?.cancel()
+        realtimeStartTask = nil
         liveDictationTranscribeInFlight = false
         liveDictationSessionID = UUID()
+        isPreparingWhisperRealtime = false
+        shouldStopPreparingWhisperRealtime = false
     }
 
     private func startLiveDictationLoopIfNeeded() {
@@ -450,11 +581,10 @@ final class AppState: ObservableObject {
         let samples = audioService.currentSamplesSnapshot()
         guard !samples.isEmpty else { return }
 
-        let recentWindowSamples = min(samples.count, 12_800) // ~0.8s
-        let recentRMS = rmsEnergy(samples.suffix(recentWindowSamples))
-        let speechRMSThreshold: Float = 0.006
+        let recentWindowSamples = min(samples.count, 16_000) // Last second of audio.
+        let recentSamples = Array(samples.suffix(recentWindowSamples))
         if !liveDictationHasSeenSpeechEnergy {
-            guard recentRMS >= speechRMSThreshold else {
+            guard SpeechActivityDetector.containsSpeech(recentSamples) else {
                 return
             }
             liveDictationHasSeenSpeechEnergy = true
@@ -494,16 +624,34 @@ final class AppState: ObservableObject {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        // Skip hallucinations and their prefixes (e.g. "Thank" growing into "Thank you.")
-        guard !WhisperService.isLikelyHallucination(trimmed) else { return }
-
         liveDictationLastPartialText = trimmed
-        lastTranscription = trimmed
+        updateLiveDictationPreview(trimmed)
+    }
 
-        // Insert "..." placeholder when speech first appears (buffered dictation path).
-        if autoInsertText && liveDictationInsertedText.isEmpty {
-            textInsertionService.insertIncrementalText("...")
-            liveDictationInsertedText = "..."
+    func updateLiveDictationPreview(_ transcript: String) {
+        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let willReplaceProvisionalText =
+            autoInsertText && liveDictationInsertedText != trimmed
+        if willReplaceProvisionalText {
+            recordingOverlayController.beginProvisionalTextReplacement()
+        }
+        defer {
+            if willReplaceProvisionalText {
+                recordingOverlayController.endProvisionalTextReplacement()
+            }
+        }
+
+        // The overlay always previews the latest hypothesis. The document preview
+        // replaces one captured AX range atomically; partial hypotheses are never
+        // appended or merged because Whisper may revise any earlier word.
+        lastTranscription = trimmed
+        guard autoInsertText else { return }
+        guard liveDictationInsertedText != trimmed else { return }
+
+        if textInsertionService.updateProvisionalText(trimmed) {
+            liveDictationInsertedText = trimmed
         }
     }
 
@@ -513,121 +661,6 @@ final class AppState: ObservableObject {
         if isRecording {
             print("[AppState] Live dictation partial failed: \(error.localizedDescription)")
         }
-    }
-
-    private static let deltaStripPunctuation: (String) -> String = { s in
-        String(s.unicodeScalars.filter {
-            CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0)
-        })
-    }
-
-    private func liveDictationDeltaToAppend(fullTranscript: String, insertedPrefix: String) -> String? {
-        guard !fullTranscript.isEmpty else { return nil }
-        guard !insertedPrefix.isEmpty else { return fullTranscript }
-        guard fullTranscript.count >= insertedPrefix.count else { return nil }
-
-        // 1. Exact prefix match
-        if fullTranscript.hasPrefix(insertedPrefix) {
-            let delta = String(fullTranscript.dropFirst(insertedPrefix.count))
-            return delta.isEmpty ? nil : delta
-        }
-
-        // 2. Case-insensitive prefix match
-        if fullTranscript.lowercased().hasPrefix(insertedPrefix.lowercased()) {
-            let delta = String(fullTranscript.dropFirst(insertedPrefix.count))
-            return delta.isEmpty ? nil : delta
-        }
-
-        let strip = Self.deltaStripPunctuation
-        let insertedWords = insertedPrefix
-            .split(separator: " ", omittingEmptySubsequences: true)
-            .map { strip(String($0)).lowercased() }
-            .filter { !$0.isEmpty }
-        let transcriptTokens = fullTranscript
-            .split(separator: " ", omittingEmptySubsequences: true)
-        let transcriptWords = transcriptTokens
-            .map { strip(String($0)).lowercased() }
-
-        guard !insertedWords.isEmpty, transcriptWords.count > insertedWords.count else { return nil }
-
-        // 3. Word-based prefix match: Whisper changed punctuation but kept the same words
-        let allWordsMatch = insertedWords.count <= transcriptWords.count &&
-            insertedWords.enumerated().allSatisfy { i, w in transcriptWords[i] == w }
-        if allWordsMatch {
-            let newTokens = transcriptTokens[insertedWords.count...]
-            return " " + newTokens.joined(separator: " ")
-        }
-
-        // 4. Suffix anchor match: Whisper added/removed words in the middle.
-        //    Find the last few words of our inserted text somewhere in the transcript,
-        //    then take everything after that point as new content.
-        let maxAnchorLen = min(insertedWords.count, 4)
-        for anchorLen in stride(from: maxAnchorLen, through: 2, by: -1) {
-            let anchor = Array(insertedWords.suffix(anchorLen))
-            // Search transcript from right to left for this anchor
-            let searchEnd = transcriptWords.count - anchorLen
-            guard searchEnd >= 0 else { continue }
-            for i in stride(from: searchEnd, through: 0, by: -1) {
-                let candidate = Array(transcriptWords[i..<(i + anchorLen)])
-                if anchor == candidate {
-                    let newStart = i + anchorLen
-                    guard newStart < transcriptTokens.count else { return nil }
-                    let newTokens = transcriptTokens[newStart...]
-                    return " " + newTokens.joined(separator: " ")
-                }
-            }
-        }
-
-        return nil
-    }
-
-    private func rmsEnergy<S: Sequence>(_ samples: S) -> Float where S.Element == Float {
-        var sumSquares: Float = 0
-        var count: Int = 0
-        for sample in samples {
-            sumSquares += sample * sample
-            count += 1
-        }
-        guard count > 0 else { return 0 }
-        return sqrt(sumSquares / Float(count))
-    }
-
-    @discardableResult
-    private func applyDictationInsertion(
-        transcript: String,
-        previouslyInsertedText: String,
-        finalResult: Bool
-    ) -> String {
-        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return previouslyInsertedText }
-
-        if previouslyInsertedText.isEmpty {
-            if finalResult {
-                textInsertionService.insertText(trimmed)
-            } else {
-                textInsertionService.insertIncrementalText(trimmed)
-            }
-            return trimmed
-        }
-
-        if trimmed == previouslyInsertedText {
-            return previouslyInsertedText
-        }
-
-        if let delta = liveDictationDeltaToAppend(fullTranscript: trimmed, insertedPrefix: previouslyInsertedText),
-           !delta.isEmpty {
-            textInsertionService.insertIncrementalText(delta)
-            return previouslyInsertedText + delta
-        }
-
-        if finalResult {
-            // Final result: replace the placeholder/streaming text with the polished transcript.
-            textInsertionService.replacePlaceholderText(previouslyInsertedText, with: trimmed)
-            return trimmed
-        }
-
-        // Streaming partial: no new content to append. Keep tracker in sync with the document.
-        return previouslyInsertedText
     }
 
     private func ensureHotkeyService() {
@@ -671,9 +704,9 @@ final class AppState: ObservableObject {
             }
             .store(in: &cancellables)
 
-        Publishers.CombineLatest($transcriptionState, $showOverlay)
-            .sink { [weak self] state, showOverlay in
-                self?.updateRecordingOverlay(state: state, showOverlay: showOverlay)
+        Publishers.CombineLatest3($transcriptionState, $showOverlay, $lastTranscription)
+            .sink { [weak self] state, showOverlay, previewText in
+                self?.updateRecordingOverlay(state: state, showOverlay: showOverlay, previewText: previewText)
             }
             .store(in: &cancellables)
 
@@ -683,7 +716,7 @@ final class AppState: ObservableObject {
             .sink { [weak self] _, _ in
                 guard let self else { return }
                 if case .loadingModel = self.transcriptionState {
-                    self.updateRecordingOverlay(state: .loadingModel, showOverlay: self.showOverlay)
+                    self.updateRecordingOverlay(state: .loadingModel, showOverlay: self.showOverlay, previewText: "")
                 }
             }
             .store(in: &cancellables)
@@ -696,7 +729,7 @@ final class AppState: ObservableObject {
             .store(in: &cancellables)
     }
 
-    private func updateRecordingOverlay(state: TranscriptionState, showOverlay: Bool) {
+    private func updateRecordingOverlay(state: TranscriptionState, showOverlay: Bool, previewText: String) {
         guard showOverlay else {
             recordingOverlayController.dismiss()
             modelLoadingOverlayController.dismiss()
@@ -717,7 +750,12 @@ final class AppState: ObservableObject {
             )
         case .recording:
             modelLoadingOverlayController.dismiss()
-            recordingOverlayController.show(state: state, modelName: whisperService.currentModelName)
+            recordingOverlayController.show(
+                state: state,
+                modelName: whisperService.currentModelName,
+                previewText: previewText,
+                targetApplicationPID: liveDictationTargetApplicationPID
+            )
         default:
             modelLoadingOverlayController.dismiss()
             recordingOverlayController.dismiss()

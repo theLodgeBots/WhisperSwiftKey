@@ -1,17 +1,38 @@
 import SwiftUI
 import ApplicationServices
+import QuartzCore
 
 /// Floating recording overlay panel
 class RecordingOverlayController {
     private var window: NSPanel?
+    private var caretIndicatorWindow: NSPanel?
     private var caretFollowTask: Task<Void, Never>?
     private var dismissGeneration = 0
+    private var shouldShowCaretIndicator = false
+    private var targetApplicationPID: pid_t?
+    private var pinnedOverlayVisibleFrame: NSRect?
+    private var suppressCaretMovementUntil = Date.distantPast
     
     @MainActor
-    func show(state: TranscriptionState, modelName: String?) {
+    func show(
+        state: TranscriptionState,
+        modelName: String?,
+        previewText: String = "",
+        targetApplicationPID requestedTargetApplicationPID: pid_t? = nil
+    ) {
+        if case .recording = state,
+           !shouldShowCaretIndicator {
+            // Capture the owner of the caret before ordering either overlay. Asking
+            // the system-wide AX element afterward can resolve to our own panel.
+            targetApplicationPID = requestedTargetApplicationPID
+                ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+            pinnedOverlayVisibleFrame = screenContainingCurrentCaret()?.visibleFrame
+                ?? NSScreen.main?.visibleFrame
+        }
+
         if window == nil {
             let panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 200, height: 60),
+                contentRect: NSRect(x: 0, y: 0, width: 380, height: 92),
                 styleMask: [.nonactivatingPanel, .borderless],
                 backing: .buffered,
                 defer: false
@@ -31,14 +52,19 @@ class RecordingOverlayController {
             window = panel
         }
         
-        let overlayView = RecordingOverlayContent(state: state, modelName: modelName)
+        let overlayView = RecordingOverlayContent(
+            state: state,
+            modelName: modelName,
+            previewText: previewText
+        )
         window?.contentView = NSHostingView(rootView: overlayView)
         window?.contentView?.layoutSubtreeIfNeeded()
-        positionWindow(for: state)
+        positionWindow()
         window?.orderFrontRegardless()
+        updateCaretIndicator(for: state)
 
         switch state {
-        case .recording, .loadingModel:
+        case .recording:
             startCaretFollowLoop()
         default:
             stopCaretFollowLoop()
@@ -50,6 +76,27 @@ class RecordingOverlayController {
         dismissGeneration += 1
         stopCaretFollowLoop()
         window?.orderOut(nil)
+        shouldShowCaretIndicator = false
+        targetApplicationPID = nil
+        pinnedOverlayVisibleFrame = nil
+        suppressCaretMovementUntil = .distantPast
+        caretIndicatorWindow?.orderOut(nil)
+    }
+
+    /// AX text replacement can briefly report the beginning of the replaced range
+    /// before the editor restores the caret to its final position. Ignore that
+    /// transient sample so the microphone does not dart backward and forward.
+    @MainActor
+    func beginProvisionalTextReplacement() {
+        suppressCaretMovementUntil = .distantFuture
+    }
+
+    /// Re-read only the final caret position after the synchronous AX edit has
+    /// finished, then glide the microphone there.
+    @MainActor
+    func endProvisionalTextReplacement() {
+        suppressCaretMovementUntil = .distantPast
+        positionAndShowCaretIndicator()
     }
     
     @MainActor
@@ -72,7 +119,7 @@ class RecordingOverlayController {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 150_000_000)
                 await MainActor.run {
-                    self?.refreshCaretAnchoredPositionIfNeeded()
+                    self?.refreshCaretIndicatorPositionIfNeeded()
                 }
             }
         }
@@ -85,67 +132,115 @@ class RecordingOverlayController {
     }
 
     @MainActor
-    private func refreshCaretAnchoredPositionIfNeeded() {
-        guard let window else { return }
-        guard window.isVisible else { return }
-        if let origin = caretAnchoredOrigin(for: window.frame.size) {
-            window.setFrameOrigin(origin)
+    private func refreshCaretIndicatorPositionIfNeeded() {
+        if shouldShowCaretIndicator {
+            positionAndShowCaretIndicator()
         }
     }
 
     @MainActor
-    private func positionWindow(for state: TranscriptionState) {
-        guard let window else { return }
+    private func updateCaretIndicator(for state: TranscriptionState) {
+        if case .recording = state {
+            shouldShowCaretIndicator = true
+            ensureCaretIndicatorWindow()
+            positionAndShowCaretIndicator()
+        } else {
+            shouldShowCaretIndicator = false
+            targetApplicationPID = nil
+            caretIndicatorWindow?.orderOut(nil)
+        }
+    }
 
-        switch state {
-        case .recording, .loadingModel:
-            if let origin = caretAnchoredOrigin(for: window.frame.size) {
-                window.setFrameOrigin(origin)
-                return
+    @MainActor
+    private func ensureCaretIndicatorWindow() {
+        guard caretIndicatorWindow == nil else { return }
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 34, height: 34),
+            styleMask: [.nonactivatingPanel, .borderless],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isFloatingPanel = true
+        panel.isMovable = false
+        panel.level = .statusBar
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.ignoresMouseEvents = true
+        panel.hidesOnDeactivate = false
+        panel.contentView = NSHostingView(rootView: DictationCaretIndicator())
+        caretIndicatorWindow = panel
+    }
+
+    @MainActor
+    private func positionAndShowCaretIndicator() {
+        guard Date() >= suppressCaretMovementUntil else { return }
+        guard let indicator = caretIndicatorWindow,
+              let caretRect = currentCaretRectInScreenCoordinates() else {
+            caretIndicatorWindow?.orderOut(nil)
+            return
+        }
+
+        let size = indicator.frame.size
+        let margin: CGFloat = 6
+        let caretMidpoint = NSPoint(x: caretRect.midX, y: caretRect.midY)
+        let screen = NSScreen.screens.first(where: { $0.visibleFrame.contains(caretMidpoint) }) ?? NSScreen.main
+        guard let visibleFrame = screen?.visibleFrame else { return }
+
+        let desiredX = caretRect.midX - (size.width / 2)
+        let aboveY = caretRect.maxY + margin
+        let belowY = caretRect.minY - size.height - margin
+        let desiredY = aboveY + size.height <= visibleFrame.maxY - 4 ? aboveY : belowY
+        let origin = NSPoint(
+            x: min(max(desiredX, visibleFrame.minX + 4), visibleFrame.maxX - size.width - 4),
+            y: min(max(desiredY, visibleFrame.minY + 4), visibleFrame.maxY - size.height - 4)
+        )
+
+        if indicator.isVisible {
+            indicator.orderFrontRegardless()
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                indicator.animator().setFrameOrigin(origin)
             }
-        default:
-            break
-        }
-
-        if let screen = NSScreen.main {
-            let x = screen.visibleFrame.maxX - window.frame.width - 20
-            let y = screen.visibleFrame.maxY - window.frame.height - 20
-            window.setFrameOrigin(NSPoint(x: x, y: y))
+        } else {
+            indicator.setFrameOrigin(origin)
+            indicator.orderFrontRegardless()
         }
     }
 
     @MainActor
-    private func caretAnchoredOrigin(for overlaySize: NSSize) -> NSPoint? {
-        guard let rect = currentCaretRectInScreenCoordinates() else { return nil }
-        let margin: CGFloat = 10
-        let desiredX = rect.maxX + margin
-        let desiredY = rect.midY - (overlaySize.height / 2)
+    private func positionWindow() {
+        guard let window else { return }
+        guard let visibleFrame = pinnedOverlayVisibleFrame ?? NSScreen.main?.visibleFrame else { return }
 
-        let candidate = NSPoint(x: desiredX, y: desiredY)
-        return clampToVisibleScreen(candidate, overlaySize: overlaySize)
+        // The transcript capsule stays fixed while the small microphone alone
+        // follows the caret. This avoids the large panel jumping as lines wrap.
+        let x = visibleFrame.maxX - window.frame.width - 20
+        let y = visibleFrame.maxY - window.frame.height - 20
+        window.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
     @MainActor
-    private func clampToVisibleScreen(_ origin: NSPoint, overlaySize: NSSize) -> NSPoint {
-        let directPoint = NSPoint(x: origin.x + overlaySize.width / 2, y: origin.y + overlaySize.height / 2)
-        let screen = NSScreen.screens.first(where: { $0.visibleFrame.contains(directPoint) }) ?? NSScreen.main
-        guard let visible = screen?.visibleFrame else { return origin }
-
-        let clampedX = min(max(origin.x, visible.minX + 8), visible.maxX - overlaySize.width - 8)
-        let clampedY = min(max(origin.y, visible.minY + 8), visible.maxY - overlaySize.height - 8)
-        return NSPoint(x: clampedX, y: clampedY)
+    private func screenContainingCurrentCaret() -> NSScreen? {
+        guard let caretRect = currentCaretRectInScreenCoordinates() else { return nil }
+        let midpoint = NSPoint(x: caretRect.midX, y: caretRect.midY)
+        return NSScreen.screens.first(where: { $0.visibleFrame.contains(midpoint) })
     }
 
     @MainActor
     private func currentCaretRectInScreenCoordinates() -> CGRect? {
-        let system = AXUIElementCreateSystemWide()
+        guard let targetApplicationPID else { return nil }
+        return Self.caretRectInScreenCoordinates(for: targetApplicationPID)
+    }
 
-        var focusedApp: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(system, kAXFocusedApplicationAttribute as CFString, &focusedApp) == .success,
-              let focusedApp else {
-            return nil
-        }
-        let focusedAppElement = focusedApp as! AXUIElement
+    /// Internal for the focused NSTextView integration test. The returned rect is
+    /// in the same AppKit screen coordinate system used to position NSPanel.
+    @MainActor
+    static func caretRectInScreenCoordinates(for applicationPID: pid_t) -> CGRect? {
+        let focusedAppElement = AXUIElementCreateApplication(applicationPID)
 
         var focusedUI: CFTypeRef?
         guard AXUIElementCopyAttributeValue(focusedAppElement, kAXFocusedUIElementAttribute as CFString, &focusedUI) == .success,
@@ -199,33 +294,71 @@ class RecordingOverlayController {
         if let converted = convertAXRectToAppKitCoordinates(rect) {
             return converted
         }
-        return rect
+        return nil
     }
 
     @MainActor
-    private func convertAXRectToAppKitCoordinates(_ rect: CGRect) -> CGRect? {
-        // If rect already appears in a visible screen region, keep it as-is.
-        let directMid = NSPoint(x: rect.midX, y: rect.midY)
-        if NSScreen.screens.contains(where: { $0.frame.contains(directMid) }) {
-            return rect
+    private static func convertAXRectToAppKitCoordinates(_ rect: CGRect) -> CGRect? {
+        // Accessibility range bounds use a top-left screen origin, while AppKit
+        // windows use a bottom-left origin. Convert against the primary display first.
+        if let primaryScreen = NSScreen.screens.first {
+            let converted = CGRect(
+                x: rect.origin.x,
+                y: primaryScreen.frame.maxY - rect.maxY,
+                width: rect.width,
+                height: rect.height
+            )
+            let convertedMidpoint = NSPoint(x: converted.midX, y: converted.midY)
+            if NSScreen.screens.contains(where: { $0.frame.contains(convertedMidpoint) }) {
+                return converted
+            }
         }
 
-        for screen in NSScreen.screens {
-            let flippedY = screen.frame.maxY - rect.origin.y - rect.height
-            let candidate = CGRect(x: rect.origin.x, y: flippedY, width: rect.width, height: rect.height)
-            let mid = NSPoint(x: candidate.midX, y: candidate.midY)
-            if screen.frame.contains(mid) {
-                return candidate
-            }
+        // Some native controls already vend AppKit-style coordinates.
+        let directMidpoint = NSPoint(x: rect.midX, y: rect.midY)
+        if NSScreen.screens.contains(where: { $0.frame.contains(directMidpoint) }) {
+            return rect
         }
 
         return nil
     }
 }
 
+private struct DictationCaretIndicator: View {
+    @State private var isPulsing = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.red.opacity(isPulsing ? 0.12 : 0.55), lineWidth: 2)
+                .scaleEffect(isPulsing ? 1.2 : 0.88)
+
+            Circle()
+                .fill(Color.black.opacity(0.86))
+                .overlay(
+                    Circle()
+                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                )
+                .frame(width: 26, height: 26)
+
+            Image(systemName: "mic.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: 34, height: 34)
+        .accessibilityLabel("Dictation is listening")
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                isPulsing = true
+            }
+        }
+    }
+}
+
 struct RecordingOverlayContent: View {
     let state: TranscriptionState
     let modelName: String?
+    let previewText: String
     
     var body: some View {
         Group {
@@ -331,9 +464,20 @@ struct RecordingOverlayContent: View {
                     .foregroundStyle(.white)
             }
 
-            Text("Dictating")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Dictating")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+
+                if !previewText.isEmpty {
+                    Text(previewText)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .lineLimit(2)
+                        .truncationMode(.head)
+                }
+            }
+            .frame(maxWidth: 310, alignment: .leading)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

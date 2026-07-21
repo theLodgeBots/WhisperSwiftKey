@@ -6,9 +6,14 @@ class AudioService {
     private var audioEngine: AVAudioEngine?
     private var collectedSamples: [Float] = []
     private var isRecording = false
+    private let sampleLock = NSLock()
     
     func startRecording() {
-        collectedSamples = []
+        sampleLock.lock()
+        collectedSamples.removeAll(keepingCapacity: true)
+        isRecording = false
+        sampleLock.unlock()
+
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
         let nativeFormat = inputNode.outputFormat(forBus: 0)
@@ -39,16 +44,20 @@ class AudioService {
             if status == .haveData, let channelData = convertedBuffer.floatChannelData?[0] {
                 let count = Int(convertedBuffer.frameLength)
                 let samples = Array(UnsafeBufferPointer(start: channelData, count: count))
-                DispatchQueue.main.async {
+                self.sampleLock.lock()
+                if self.isRecording {
                     self.collectedSamples.append(contentsOf: samples)
                 }
+                self.sampleLock.unlock()
             }
         }
         
         do {
             try engine.start()
             audioEngine = engine
+            sampleLock.lock()
             isRecording = true
+            sampleLock.unlock()
             print("[AudioService] Recording started (16kHz mono)")
         } catch {
             print("[AudioService] Failed to start: \(error)")
@@ -57,15 +66,21 @@ class AudioService {
     
     /// Stop recording and return raw 16kHz Float samples for WhisperKit
     func stopRecording() -> [Float]? {
-        guard let engine = audioEngine, isRecording else { return nil }
+        sampleLock.lock()
+        let wasRecording = isRecording
+        isRecording = false
+        sampleLock.unlock()
+
+        guard let engine = audioEngine, wasRecording else { return nil }
         
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        isRecording = false
         audioEngine = nil
-        
+
+        sampleLock.lock()
         let samples = collectedSamples
-        collectedSamples = []
+        collectedSamples.removeAll(keepingCapacity: true)
+        sampleLock.unlock()
         
         let duration = Double(samples.count) / 16000.0
         print("[AudioService] Captured \(samples.count) samples (\(String(format: "%.1f", duration))s)")
@@ -74,15 +89,21 @@ class AudioService {
     }
 
     func currentSamplesSnapshot() -> [Float] {
-        collectedSamples
+        sampleLock.lock()
+        defer { sampleLock.unlock() }
+        return collectedSamples
     }
 
     var currentSampleCount: Int {
-        collectedSamples.count
+        sampleLock.lock()
+        defer { sampleLock.unlock() }
+        return collectedSamples.count
     }
 
     var recordingActive: Bool {
-        isRecording
+        sampleLock.lock()
+        defer { sampleLock.unlock() }
+        return isRecording
     }
     
     func requestPermission(completion: @escaping (Bool) -> Void) {
@@ -91,5 +112,45 @@ class AudioService {
                 completion(granted)
             }
         }
+    }
+}
+
+/// Lightweight speech gate used before decoding. It adapts to the current microphone's
+/// noise floor instead of treating common words as hallucinations.
+enum SpeechActivityDetector {
+    private static let frameSize = 320 // 20 ms at Whisper's 16 kHz sample rate
+
+    static func containsSpeech(_ samples: [Float]) -> Bool {
+        guard samples.count >= frameSize * 4 else { return false }
+
+        var frameEnergies: [Float] = []
+        frameEnergies.reserveCapacity(samples.count / frameSize)
+
+        var offset = 0
+        while offset + frameSize <= samples.count {
+            var sumSquares: Float = 0
+            for sample in samples[offset..<(offset + frameSize)] {
+                sumSquares += sample * sample
+            }
+            frameEnergies.append(sqrt(sumSquares / Float(frameSize)))
+            offset += frameSize
+        }
+
+        guard frameEnergies.count >= 4 else { return false }
+        let sorted = frameEnergies.sorted()
+        let noiseFloor = sorted[min(sorted.count - 1, max(0, sorted.count / 5))]
+        let adaptiveThreshold = max(0.0025, noiseFloor * 3)
+        let adaptiveSpeechFrames = frameEnergies.filter { $0 >= adaptiveThreshold }.count
+
+        // Require approximately 80 ms of voiced audio to avoid reacting to clicks.
+        if adaptiveSpeechFrames >= 4 {
+            return true
+        }
+
+        // A sustained voice can occupy the entire capture, making a purely local
+        // noise estimate as loud as the speech itself. Keep a conservative absolute
+        // floor so that case is recognized without treating digital silence as speech.
+        let absoluteSpeechFrames = frameEnergies.filter { $0 >= 0.006 }.count
+        return absoluteSpeechFrames >= 4
     }
 }
