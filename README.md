@@ -24,6 +24,24 @@ Native macOS speech-to-text keyboard input using [WhisperKit](https://github.com
 2. Select your signing team
 3. Build & Run (⌘R)
 
+## Direct distribution
+
+WhisperSwiftKey is distributed outside the Mac App Store because its core
+cross-application text insertion and cursor tracking use macOS Accessibility
+APIs that are unavailable to an App Sandbox process.
+
+To create a notarized release:
+
+1. Install a **Developer ID Application** certificate for the signing team in
+   Xcode's Accounts settings.
+2. Select **Product → Archive** using the Release configuration.
+3. In Organizer, select **Distribute App → Direct Distribution**.
+4. Let Xcode sign with Developer ID, upload for notarization, and export the
+   notarized app.
+
+Release builds enable Hardened Runtime for notarization. App Sandbox remains
+disabled intentionally.
+
 ## Architecture
 - **SwiftUI** menu bar app (no dock icon)
 - **WhisperKit** for on-device speech recognition

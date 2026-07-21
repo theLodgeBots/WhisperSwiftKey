@@ -24,8 +24,8 @@ targets:
         INFOPLIST_FILE: WhisperSwiftKey/Info.plist
         CODE_SIGN_ENTITLEMENTS: WhisperSwiftKey/WhisperSwiftKey.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: com.laanlabs.WhisperSwiftKey
-        MARKETING_VERSION: "0.1.1"
-        CURRENT_PROJECT_VERSION: "2"
+        MARKETING_VERSION: "0.1.2"
+        CURRENT_PROJECT_VERSION: "3"
         SWIFT_VERSION: "5.9"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         CODE_SIGN_STYLE: Automatic
@@ -45,6 +45,13 @@ targets:
         ENABLE_RESOURCE_ACCESS_LOCATION: NO
         ENABLE_RESOURCE_ACCESS_PRINTING: NO
         ENABLE_RESOURCE_ACCESS_USB: NO
+      configs:
+        # Keep Debug compatible with the ad-hoc signed XCTest runner. Release
+        # archives use Hardened Runtime as required for notarization.
+        Debug:
+          ENABLE_HARDENED_RUNTIME: NO
+        Release:
+          ENABLE_HARDENED_RUNTIME: YES
     entitlements:
       path: WhisperSwiftKey/WhisperSwiftKey.entitlements
       properties:
