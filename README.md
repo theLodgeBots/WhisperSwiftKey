@@ -4,7 +4,7 @@ Native macOS speech-to-text keyboard input using [WhisperKit](https://github.com
 
 ## Download
 
-[**Download WhisperSwiftKey 0.1.2 for macOS**](https://github.com/theLodgeBots/WhisperSwiftKey/releases/download/v0.1.2/WhisperSwiftKey-0.1.2.zip)
+[**Download WhisperSwiftKey 0.1.2 for macOS**](https://github.com/laanlabs/WhisperSwiftKey/releases/download/v0.1.2/WhisperSwiftKey-0.1.2.zip)
 
 Version 0.1.2 is signed with a Developer ID certificate, notarized by Apple,
 and includes a stapled notarization ticket. WhisperSwiftKey is distributed
