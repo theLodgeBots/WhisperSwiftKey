@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-08-18
 **Branch:** main
-**Release candidate:** 0.2.0 (build 4)
+**Current release:** 0.2.0 (build 4)
 **Automated tests:** 21 passing
 
 ## Current functionality
@@ -50,7 +50,7 @@ xcodebuild \
 - [ ] Dictation inserts once in a browser text field.
 - [ ] Floating microphone follows the active caret without moving the transcript panel.
 - [ ] System-audio start, live update, stop, copy, and history flow works.
-- [ ] Git tag, GitHub release, checksum, and README download link resolve.
+- [x] Git tag, GitHub release, checksum, and README download link resolve.
 
 Cross-application smoke tests must use the app from `/Applications` with
 Accessibility permission granted to that exact signed build. Screen Recording
