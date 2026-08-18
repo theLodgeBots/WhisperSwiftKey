@@ -4,9 +4,9 @@ Native macOS speech-to-text keyboard input using [WhisperKit](https://github.com
 
 ## Download
 
-[**Download WhisperSwiftKey 0.1.2 for macOS**](https://github.com/laanlabs/WhisperSwiftKey/releases/download/v0.1.2/WhisperSwiftKey-0.1.2.zip)
+[**Download WhisperSwiftKey 0.2.0 for macOS**](https://github.com/laanlabs/WhisperSwiftKey/releases/download/v0.2.0/WhisperSwiftKey-0.2.0.zip)
 
-Version 0.1.2 is signed with a Developer ID certificate, notarized by Apple,
+Version 0.2.0 is signed with a Developer ID certificate, notarized by Apple,
 and includes a stapled notarization ticket. WhisperSwiftKey is distributed
 directly because the cross-application Accessibility APIs it needs are not
 available to Mac App Store sandboxed apps.
@@ -14,11 +14,12 @@ available to Mac App Store sandboxed apps.
 ## Features
 
 - Double-tap Fn/Globe to start and stop dictation at the active text cursor
-- Real-time transcription preview while speaking
+- Real-time transcription preview at the active text cursor while speaking
 - Floating microphone feedback near the caret and a stable transcript panel
+- System-audio transcription for calls, videos, and other audio playing on the Mac
 - Push-to-talk and tap-to-toggle modes
 - Multiple on-device Whisper models with automatic language detection
-- Local transcription history and custom vocabulary
+- Searchable local transcription history and custom vocabulary
 - Completely on-device transcription after the selected model is downloaded
 
 ## Requirements
@@ -27,11 +28,12 @@ available to Mac App Store sandboxed apps.
 - Apple Silicon (M1 or later)
 - Microphone permission
 - Accessibility permission (for text insertion)
+- Screen Recording permission (only for optional system-audio transcription)
 - Internet access for the initial Whisper model download
 
 ## Install and use
 
-1. Download and unzip `WhisperSwiftKey-0.1.2.zip`.
+1. Download and unzip `WhisperSwiftKey-0.2.0.zip`.
 2. Move `WhisperSwiftKey.app` to `/Applications` before opening it.
 3. Open the app and complete its onboarding steps.
 4. Grant Microphone and Accessibility access when prompted.
@@ -42,6 +44,11 @@ available to Mac App Store sandboxed apps.
 WhisperSwiftKey is a menu bar app and does not appear in the Dock. If Fn/Globe
 does not activate dictation, check **System Settings → Keyboard** for a macOS
 shortcut that is already using that key.
+
+To transcribe audio playing on the Mac, choose **Transcribe System Audio…**
+from the menu-bar menu. macOS will request Screen Recording access the first
+time this feature is used; WhisperSwiftKey captures the audio track and keeps
+transcription on-device.
 
 ## Building
 
@@ -73,7 +80,8 @@ disabled intentionally.
 
 - **SwiftUI** menu bar app (no dock icon)
 - **WhisperKit** for on-device speech recognition
-- **SwiftData** for transcription history
+- **ScreenCaptureKit** for optional system-audio capture
+- **UserDefaults-backed Codable storage** for local transcription history
 - **CGEvent** tap for global hotkey detection
 - **Accessibility API** for text insertion at cursor
 

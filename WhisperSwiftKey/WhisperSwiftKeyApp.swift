@@ -73,6 +73,10 @@ final class WhisperSwiftKeyAppDelegate: NSObject, NSApplicationDelegate {
             let firstUpdate = insertionService.updateProvisionalText("Hey")
             let secondUpdate = insertionService.updateProvisionalText("Hey, what's going on now?")
             let committed = insertionService.commitProvisionalText("Hey, what's going on now?")
+            if committed == .needsFallbackInsertion {
+                insertionService.insertText("Hey, what's going on now?")
+                try? await Task.sleep(for: .milliseconds(250))
+            }
             let caretRect = RecordingOverlayController.caretRectInScreenCoordinates(
                 for: targetApplication.processIdentifier
             )
@@ -81,7 +85,7 @@ final class WhisperSwiftKeyAppDelegate: NSObject, NSApplicationDelegate {
             Self.writeSmokeResult(
                 "AX_SMOKE target=\(targetApplication.localizedName ?? "unknown") " +
                 "trusted=\(AXIsProcessTrusted()) " +
-                "first=\(firstUpdate) second=\(secondUpdate) commit=\(committed) " +
+                "first=\(firstUpdate) second=\(secondUpdate) commit=\(String(describing: committed)) " +
                 "caret=\(caretRect.map(String.init(describing:)) ?? "nil") " +
                 "value=\(focusedValue)"
             )
@@ -139,7 +143,7 @@ struct WhisperSwiftKeyApp: App {
                 .environmentObject(appState)
         } label: {
             Image(systemName: menuBarIconName)
-                .symbolEffect(.pulse, isActive: appState.isRecording)
+                .symbolEffect(.pulse, isActive: appState.isRecording || appState.isSystemAudioTranscribing)
                 .symbolEffect(.bounce, value: appState.hotkeyFeedbackCount)
         }
         
@@ -148,6 +152,20 @@ struct WhisperSwiftKeyApp: App {
                 .environmentObject(appState)
         }
         
+        Window("Transcription History", id: "dictation-history") {
+            DictationHistoryWindowView()
+                .environmentObject(appState)
+        }
+        .defaultSize(width: 480, height: 400)
+        .defaultPosition(.center)
+
+        Window("System Audio Transcription", id: "system-transcript") {
+            SystemAudioTranscriptView()
+                .environmentObject(appState)
+        }
+        .defaultSize(width: 480, height: 380)
+        .defaultPosition(.center)
+
         // Onboarding window
         Window("Welcome to WhisperSwiftKey", id: "onboarding") {
             OnboardingView(isPresented: $showOnboarding)
@@ -161,6 +179,12 @@ struct WhisperSwiftKeyApp: App {
     private var menuBarIconName: String {
         if appState.hotkeyFeedbackActive {
             return "keyboard"
+        }
+        if appState.isSystemAudioTranscribing {
+            return "waveform.circle.fill"
+        }
+        if appState.isSystemAudioFinishing {
+            return "ellipsis.circle"
         }
         return appState.isRecording ? "mic.fill" : "mic"
     }

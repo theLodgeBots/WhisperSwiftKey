@@ -153,4 +153,31 @@ enum SpeechActivityDetector {
         let absoluteSpeechFrames = frameEnergies.filter { $0 >= 0.006 }.count
         return absoluteSpeechFrames >= 4
     }
+
+    /// Picks a sample index at which a long capture can be split without cutting
+    /// through a word: the middle of the quietest 300 ms window inside the
+    /// trailing `searchWindow` samples. Falls back to the end of the buffer.
+    static func quietestCutIndex(in samples: [Float], searchingLast searchWindow: Int) -> Int {
+        let windowSize = 4_800 // 300 ms at 16 kHz
+        let hop = windowSize / 2
+        guard samples.count > windowSize else { return samples.count }
+
+        let searchStart = max(0, samples.count - max(searchWindow, windowSize))
+        var bestIndex = samples.count
+        var bestEnergy = Float.greatestFiniteMagnitude
+
+        var offset = searchStart
+        while offset + windowSize <= samples.count {
+            var sumSquares: Float = 0
+            for sample in samples[offset..<(offset + windowSize)] {
+                sumSquares += sample * sample
+            }
+            if sumSquares < bestEnergy {
+                bestEnergy = sumSquares
+                bestIndex = offset + windowSize / 2
+            }
+            offset += hop
+        }
+        return bestIndex
+    }
 }

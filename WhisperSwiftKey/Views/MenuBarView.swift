@@ -4,6 +4,7 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
     @EnvironmentObject var appState: AppState
+    @State private var copiedDictationID: UUID?
     
     var body: some View {
         VStack(spacing: 0) {
@@ -41,10 +42,12 @@ struct MenuBarView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
-                
+
                 Divider()
             }
-            
+
+            recentDictationsSection
+
             // Actions
             Button {
                 appState.toggleRecording()
@@ -54,7 +57,31 @@ struct MenuBarView: View {
                     systemImage: appState.isRecording ? "stop.circle.fill" : "mic.circle.fill"
                 )
             }
+            .disabled(appState.isSystemAudioTranscribing || appState.isSystemAudioFinishing)
             .keyboardShortcut("r", modifiers: [.command])
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+
+            Button {
+                if appState.isSystemAudioTranscribing {
+                    appState.stopSystemAudioTranscription()
+                    openWindow(id: "system-transcript")
+                    NSApp.activate(ignoringOtherApps: true)
+                } else {
+                    openWindow(id: "system-transcript")
+                    NSApp.activate(ignoringOtherApps: true)
+                    appState.startSystemAudioTranscription()
+                }
+            } label: {
+                Label(
+                    appState.isSystemAudioTranscribing
+                        ? "Stop System Audio Transcription"
+                        : (appState.isSystemAudioFinishing ? "Finishing System Audio Transcript..." : "Transcribe System Audio..."),
+                    systemImage: appState.isSystemAudioTranscribing ? "stop.circle" : "waveform"
+                )
+            }
+            .disabled(appState.isSystemAudioFinishing || appState.isRecording)
+            .keyboardShortcut("t", modifiers: [.command])
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             
@@ -108,6 +135,47 @@ struct MenuBarView: View {
         .onAppear {
             appState.refreshAccessibilityPermissionStatus()
             appState.refreshFnKeyConflictStatus()
+        }
+    }
+
+    @ViewBuilder
+    private var recentDictationsSection: some View {
+        let recent = appState.recentDictations()
+        if !recent.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Recent dictations — click to copy")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 6)
+                    .padding(.bottom, 2)
+
+                ForEach(recent) { item in
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(item.originalText, forType: .string)
+                        copiedDictationID = item.id
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: copiedDictationID == item.id ? "checkmark" : "doc.on.doc")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(item.originalText)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Spacer(minLength: 0)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 3)
+                    .help(item.originalText)
+                }
+            }
+            .padding(.bottom, 4)
+
+            Divider()
         }
     }
 
@@ -222,6 +290,12 @@ struct MenuBarView: View {
         if case .possibleSystemConflict = appState.fnKeyConflictStatus {
             return .orange
         }
+        if appState.isSystemAudioTranscribing {
+            return .red
+        }
+        if appState.isSystemAudioFinishing {
+            return .orange
+        }
         switch appState.transcriptionState {
         case .idle: return .green
         case .loadingModel: return .orange
@@ -238,6 +312,12 @@ struct MenuBarView: View {
         }
         if case .possibleSystemConflict = appState.fnKeyConflictStatus {
             return "Check Fn/Globe keyboard setting"
+        }
+        if appState.isSystemAudioTranscribing {
+            return "Transcribing system audio..."
+        }
+        if appState.isSystemAudioFinishing {
+            return "Finishing system audio transcript..."
         }
         switch appState.transcriptionState {
         case .idle: return "Ready - Double-tap Fn/Globe to dictate"

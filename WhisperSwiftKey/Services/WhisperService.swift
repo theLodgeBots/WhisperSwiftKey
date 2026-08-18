@@ -220,14 +220,30 @@ class WhisperService: ObservableObject {
 
         let results = await kit.transcribe(audioArrays: [samples], decodeOptions: options)
 
-        // Flatten results and strip any residual Whisper control tokens
-        let text = Self.stripWhisperTokens(
-            results
-                .compactMap { $0 }
-                .flatMap { $0 }
-                .map { $0.text }
-                .joined(separator: " ")
-        )
+        // Filter segment-by-segment so hallucinated phrases decoded from silent
+        // stretches (e.g. a trailing "Thank you.") are dropped while real speech
+        // in the same recording is kept.
+        let segmentTexts = results
+            .compactMap { $0 }
+            .flatMap { $0 }
+            .flatMap { $0.segments }
+            .compactMap { segment -> String? in
+                let cleaned = Self.stripWhisperTokens(segment.text)
+                guard !cleaned.isEmpty else { return nil }
+                if Self.isLikelyHallucination(
+                    text: cleaned,
+                    noSpeechProb: segment.noSpeechProb,
+                    avgLogprob: segment.avgLogprob
+                ) {
+                    print("[WhisperService] Dropped likely hallucinated segment \"\(cleaned)\" (noSpeechProb=\(segment.noSpeechProb), avgLogprob=\(segment.avgLogprob))")
+                    return nil
+                }
+                return cleaned
+            }
+
+        let text = segmentTexts
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         print("[WhisperService] Transcribed: \(text.prefix(100))")
         return text
@@ -370,8 +386,8 @@ class WhisperService: ObservableObject {
     /// confirmedText: only stable segments that won't be revised — safe to insert into the document.
     /// displayText: full transcript including unconfirmed/in-progress text — for overlay display only.
     private static func realtimeTranscriptTexts(from state: AudioStreamTranscriber.State) -> (confirmed: String, display: String) {
-        let confirmed = state.confirmedSegments.map(\.text).joined()
-        let unconfirmedSegmentsText = state.unconfirmedSegments.map(\.text).joined()
+        let confirmed = filteredSegmentText(state.confirmedSegments)
+        let unconfirmedSegmentsText = filteredSegmentText(state.unconfirmedSegments)
 
         let currentText: String
         if state.currentText == "Waiting for speech..." {
@@ -437,6 +453,79 @@ class WhisperService: ObservableObject {
                 range: range
             )
         }
+    }
+
+    private static func filteredSegmentText(_ segments: [TranscriptionSegment]) -> String {
+        segments
+            .filter { segment in
+                !isLikelyHallucination(
+                    text: stripWhisperTokens(segment.text),
+                    noSpeechProb: segment.noSpeechProb,
+                    avgLogprob: segment.avgLogprob
+                )
+            }
+            .map(\.text)
+            .joined()
+    }
+
+    /// Phrases Whisper is known to invent when decoding silence or background
+    /// noise, stored in normalized form (lowercased, punctuation removed).
+    static let hallucinationPhrases: Set<String> = [
+        "you",
+        "bye",
+        "bye bye",
+        "goodbye",
+        "the end",
+        "thank you",
+        "thank you thank you",
+        "thanks",
+        "thank you for watching",
+        "thanks for watching",
+        "thank you so much",
+        "thank you so much for watching",
+        "thank you for listening",
+        "thanks for listening",
+        "thanks for watching and see you in the next video",
+        "see you in the next video",
+        "see you next time",
+        "see you in the next one",
+        "please subscribe",
+        "please like and subscribe",
+        "don t forget to subscribe",
+        "subtitles by the amara org community",
+        "subtitles created by the amara org community",
+        "www mooji org",
+    ]
+
+    /// Decides whether a decoded segment is a silence hallucination rather than
+    /// real speech. Known ghost phrases are only dropped when the segment's own
+    /// audio metadata also points at silence, so a genuinely spoken "Thank you."
+    /// (low noSpeechProb, healthy logprob) is preserved.
+    static func isLikelyHallucination(text: String, noSpeechProb: Float, avgLogprob: Float) -> Bool {
+        let normalized = normalizedTranscriptPhrase(text)
+        guard !normalized.isEmpty else { return true }
+
+        // Whisper's own silence heuristic: the model believes the window is
+        // non-speech and decoded it with low confidence.
+        if noSpeechProb > 0.6 && avgLogprob < -0.35 {
+            return true
+        }
+
+        if hallucinationPhrases.contains(normalized) && (noSpeechProb > 0.2 || avgLogprob < -0.6) {
+            return true
+        }
+
+        return false
+    }
+
+    /// Lowercases and strips punctuation so "Thank you!" and "thank you." both
+    /// normalize to "thank you" for blocklist comparison.
+    static func normalizedTranscriptPhrase(_ text: String) -> String {
+        text
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     /// Remove Whisper control tokens like <|startoftranscript|>, <|en|>, <|0.00|>, etc.

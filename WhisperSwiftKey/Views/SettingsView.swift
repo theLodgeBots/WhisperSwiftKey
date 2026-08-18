@@ -37,7 +37,8 @@ struct SettingsView: View {
 
 struct GeneralSettingsView: View {
     @EnvironmentObject var appState: AppState
-    
+    @Environment(\.openWindow) private var openWindow
+
     var body: some View {
         Form {
             Section("Dictation Hotkey") {
@@ -208,12 +209,16 @@ struct GeneralSettingsView: View {
                 }
             }
             
-            Section("AI Agent (Optional)") {
-                Toggle("Enable AI agent", isOn: $appState.agentEnabled)
-                if appState.agentEnabled {
-                    TextField("Agent name (e.g., Jarvis)", text: $appState.agentName)
-                        .textFieldStyle(.roundedBorder)
-                    Text("Say \"Hey \(appState.agentName.isEmpty ? "Agent" : appState.agentName), ...\" to trigger AI processing")
+            Section("History") {
+                HStack {
+                    Button {
+                        openWindow(id: "dictation-history")
+                        NSApp.activate(ignoringOtherApps: true)
+                    } label: {
+                        Label("Open Transcription History…", systemImage: "clock.arrow.circlepath")
+                    }
+                    Spacer()
+                    Text("Browse and copy past transcriptions")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -517,69 +522,23 @@ struct DictionarySettingsView: View {
 
 struct HistorySettingsView: View {
     @EnvironmentObject var appState: AppState
-    @State private var history: [Transcription] = []
-    @State private var searchText = ""
-    
-    var filteredHistory: [Transcription] {
-        if searchText.isEmpty { return history }
-        return history.filter { $0.originalText.localizedCaseInsensitiveContains(searchText) }
-    }
-    
+    @Environment(\.openWindow) private var openWindow
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 0) {
+            DictationHistoryList()
+                .environmentObject(appState)
+
             HStack {
-                Text("Transcription History")
-                    .font(.headline)
+                Button {
+                    openWindow(id: "dictation-history")
+                    NSApp.activate(ignoringOtherApps: true)
+                } label: {
+                    Label("Open in Separate Window", systemImage: "macwindow.on.rectangle")
+                }
                 Spacer()
-                Button("Clear All", role: .destructive) {
-                    appState.clearHistory()
-                    history = []
-                }
-                .disabled(history.isEmpty)
             }
-            
-            TextField("Search...", text: $searchText)
-                .textFieldStyle(.roundedBorder)
-            
-            if filteredHistory.isEmpty {
-                VStack {
-                    Spacer()
-                    Text(history.isEmpty ? "No transcriptions yet" : "No matches")
-                        .foregroundColor(.secondary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
-            } else {
-                List(filteredHistory, id: \.id) { item in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(item.originalText)
-                            .font(.body)
-                            .lineLimit(2)
-                        
-                        HStack(spacing: 12) {
-                            Text(item.timestamp, style: .relative)
-                            Text("\(item.wordCount) words")
-                            Text(String(format: "%.1fs", item.durationSeconds))
-                            if let lang = item.language {
-                                Text(lang.uppercased())
-                            }
-                        }
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    }
-                    .padding(.vertical, 2)
-                    .contextMenu {
-                        Button("Copy") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(item.originalText, forType: .string)
-                        }
-                    }
-                }
-            }
-        }
-        .padding()
-        .onAppear {
-            history = appState.fetchHistory()
+            .padding([.horizontal, .bottom])
         }
     }
 }

@@ -78,6 +78,7 @@ final class AppState: ObservableObject {
 
     let audioService = AudioService()
     let whisperService = WhisperService()
+    let systemAudioCaptureService = SystemAudioCaptureService()
     let textInsertionService: any TextInsertionServing
     private let recordingOverlayController = RecordingOverlayController()
     private let modelLoadingOverlayController = ModelLoadingOverlayController()
@@ -131,7 +132,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private var history: [Transcription]
+    @Published private(set) var history: [Transcription]
     private var cancellables = Set<AnyCancellable>()
     private var lastDoubleTapHotkeyTriggerAt: Date?
     private var lastObservedDoubleTapConflictDetail: String?
@@ -151,10 +152,22 @@ final class AppState: ObservableObject {
     private var liveDictationLastPartialText = ""
     private var liveDictationHasSeenSpeechEnergy = false
     private var liveDictationTargetApplicationPID: pid_t?
+    private var liveDictationSupportsProvisionalInsertion = true
     private var isUsingWhisperRealtimeStreaming = false
     private var isPreparingWhisperRealtime = false
     private var shouldStopPreparingWhisperRealtime = false
     private var finalizationGate = DictationFinalizationGate()
+
+    @Published var isSystemAudioTranscribing = false
+    @Published private(set) var isSystemAudioFinishing = false
+    @Published var systemAudioTranscript = ""
+    @Published var systemAudioStatusMessage: String?
+    private var systemAudioSessionID = UUID()
+    private var systemAudioLoopTask: Task<Void, Never>?
+    private var systemAudioCommittedText = ""
+    private var systemAudioTranscribeInFlight = false
+    private var systemAudioLastLiveSampleCount = 0
+    private var systemAudioSessionStartedAt: Date?
 
     var runtimeBundleIdentifier: String {
         Bundle.main.bundleIdentifier ?? "(missing bundle identifier)"
@@ -228,6 +241,10 @@ final class AppState: ObservableObject {
         }
         guard !finalizationGate.hasPendingSession else {
             print("[AppState] Ignoring start while the previous dictation is finalizing")
+            return
+        }
+        guard !isSystemAudioTranscribing, !isSystemAudioFinishing else {
+            transcriptionState = .error("Stop system-audio transcription before dictating")
             return
         }
         // Don't start a new load if one is already in progress
@@ -341,7 +358,6 @@ final class AppState: ObservableObject {
 
         let finalizationSessionID = liveDictationSessionID
         guard finalizationGate.begin(sessionID: finalizationSessionID) else { return }
-        let insertedPrefix = liveDictationInsertedText
         let language = selectedLanguage == "auto" ? nil : selectedLanguage
         let prompt = customDictionary.isEmpty ? nil : customDictionary.joined(separator: ", ")
         endLiveDictationSession()
@@ -349,7 +365,6 @@ final class AppState: ObservableObject {
             audioService.stopRecording(),
             language: language,
             prompt: prompt,
-            insertedPrefix: insertedPrefix,
             finalizationSessionID: finalizationSessionID
         )
     }
@@ -360,7 +375,6 @@ final class AppState: ObservableObject {
             print("[AppState] Ignoring duplicate realtime finalization request")
             return
         }
-        let insertedPrefix = liveDictationInsertedText
         let language = selectedLanguage == "auto" ? nil : selectedLanguage
         let prompt = customDictionary.isEmpty ? nil : customDictionary.joined(separator: ", ")
         isUsingWhisperRealtimeStreaming = false
@@ -375,7 +389,6 @@ final class AppState: ObservableObject {
                     samples,
                     language: language,
                     prompt: prompt,
-                    insertedPrefix: insertedPrefix,
                     finalizationSessionID: finalizationSessionID
                 )
             }
@@ -386,16 +399,229 @@ final class AppState: ObservableObject {
         history.sorted { $0.timestamp > $1.timestamp }
     }
 
+    /// The most recent dictations for the menu-bar quick-copy list.
+    func recentDictations(limit: Int = 5) -> [Transcription] {
+        Array(fetchHistory().prefix(limit))
+    }
+
     func clearHistory() {
         history = []
         persistHistory()
+    }
+
+    private func saveToHistory(text: String, durationSeconds: Double, language: String?) {
+        history.insert(
+            Transcription(
+                originalText: text,
+                durationSeconds: durationSeconds,
+                language: language
+            ),
+            at: 0
+        )
+        if history.count > 500 {
+            history = Array(history.prefix(500))
+        }
+        persistHistory()
+    }
+
+    // MARK: - System audio transcription
+
+    func toggleSystemAudioTranscription() {
+        if isSystemAudioTranscribing {
+            stopSystemAudioTranscription()
+        } else {
+            startSystemAudioTranscription()
+        }
+    }
+
+    /// Transcribes everything the system is playing (videos, calls, music) via
+    /// a ScreenCaptureKit audio tap. The transcript accumulates in
+    /// `systemAudioTranscript` and is saved to history when stopped.
+    func startSystemAudioTranscription() {
+        guard !isSystemAudioTranscribing, !isSystemAudioFinishing else { return }
+        guard !isRecording, !isPreparingWhisperRealtime else {
+            systemAudioStatusMessage = "Stop dictation before transcribing system audio."
+            return
+        }
+        guard !finalizationGate.hasPendingSession else {
+            systemAudioStatusMessage = "Wait for the current dictation to finish before transcribing system audio."
+            return
+        }
+
+        let sessionID = UUID()
+        systemAudioSessionID = sessionID
+        systemAudioTranscript = ""
+        systemAudioCommittedText = ""
+        systemAudioLastLiveSampleCount = 0
+        systemAudioTranscribeInFlight = false
+        systemAudioStatusMessage = "Starting system audio capture..."
+        isSystemAudioTranscribing = true
+        isSystemAudioFinishing = false
+        systemAudioSessionStartedAt = Date()
+
+        systemAudioCaptureService.onStreamStopped = { [weak self] error in
+            Task { @MainActor [weak self] in
+                guard let self, self.systemAudioSessionID == sessionID, self.isSystemAudioTranscribing else { return }
+                let failureMessage = error.map { "System audio capture stopped: \($0.localizedDescription)" }
+                self.stopSystemAudioTranscription(finalStatusMessage: failureMessage)
+            }
+        }
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.whisperService.ensureModelLoaded(self.selectedModel)
+                try await self.systemAudioCaptureService.startCapture()
+            } catch {
+                await MainActor.run {
+                    guard self.systemAudioSessionID == sessionID else { return }
+                    self.isSystemAudioTranscribing = false
+                    self.isSystemAudioFinishing = false
+                    self.systemAudioStatusMessage = Self.systemAudioStartFailureMessage(for: error)
+                }
+                return
+            }
+            await MainActor.run {
+                guard self.systemAudioSessionID == sessionID, self.isSystemAudioTranscribing else {
+                    Task { _ = await self.systemAudioCaptureService.stopCapture() }
+                    return
+                }
+                self.systemAudioStatusMessage = "Listening to system audio..."
+                self.startSystemAudioLoop(sessionID: sessionID)
+            }
+        }
+    }
+
+    func stopSystemAudioTranscription() {
+        stopSystemAudioTranscription(finalStatusMessage: nil)
+    }
+
+    private func stopSystemAudioTranscription(finalStatusMessage: String?) {
+        guard isSystemAudioTranscribing else { return }
+        isSystemAudioTranscribing = false
+        isSystemAudioFinishing = true
+        let liveTranscriptionTask = systemAudioLoopTask
+        liveTranscriptionTask?.cancel()
+        systemAudioLoopTask = nil
+
+        // Invalidate any in-flight partial transcription so it cannot race the
+        // final pass below; the final pass runs under this fresh session ID.
+        let finalSessionID = UUID()
+        systemAudioSessionID = finalSessionID
+        systemAudioStatusMessage = "Finishing transcript..."
+
+        let language = selectedLanguage == "auto" ? nil : selectedLanguage
+        let prompt = customDictionary.isEmpty ? nil : customDictionary.joined(separator: ", ")
+        let startedAt = systemAudioSessionStartedAt
+
+        Task { [weak self] in
+            guard let self else { return }
+            let remaining = await self.systemAudioCaptureService.stopCapture()
+
+            // Cancellation prevents another live tick, but WhisperKit may still
+            // be finishing the inference already in progress. Wait for that task
+            // before using the same model for the final tail transcription.
+            await liveTranscriptionTask?.value
+
+            var finalText = await MainActor.run { self.systemAudioCommittedText }
+            if SpeechActivityDetector.containsSpeech(remaining),
+               let tail = try? await self.whisperService.transcribe(samples: remaining, language: language, prompt: prompt) {
+                let trimmedTail = tail.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedTail.isEmpty {
+                    finalText = WhisperService.mergeTranscriptFragments(finalText, trimmedTail)
+                }
+            }
+
+            await MainActor.run {
+                guard self.systemAudioSessionID == finalSessionID else { return }
+                self.systemAudioCommittedText = finalText
+                self.systemAudioTranscript = finalText
+                self.isSystemAudioFinishing = false
+                self.systemAudioStatusMessage = finalStatusMessage ?? (finalText.isEmpty
+                    ? "No speech detected in system audio."
+                    : nil)
+                if !finalText.isEmpty {
+                    let duration = startedAt.map { Date().timeIntervalSince($0) } ?? 0
+                    self.saveToHistory(text: finalText, durationSeconds: duration, language: language)
+                }
+            }
+        }
+    }
+
+    private func startSystemAudioLoop(sessionID: UUID) {
+        systemAudioLoopTask?.cancel()
+        systemAudioLoopTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                await self?.runSystemAudioTick(sessionID: sessionID)
+            }
+        }
+    }
+
+    private func runSystemAudioTick(sessionID: UUID) async {
+        guard isSystemAudioTranscribing, sessionID == systemAudioSessionID else { return }
+        guard !systemAudioTranscribeInFlight, whisperService.isModelLoaded else { return }
+
+        let samples = systemAudioCaptureService.snapshot()
+        let chunkSampleCount = 30 * 16_000
+
+        if samples.count >= chunkSampleCount {
+            // Close out a chunk at the quietest recent moment so words are not
+            // cut in half, then transcribe it once and commit the text.
+            let cutIndex = SpeechActivityDetector.quietestCutIndex(
+                in: samples,
+                searchingLast: 8 * 16_000
+            )
+            let chunk = Array(samples[..<cutIndex])
+            systemAudioCaptureService.consumeSamples(cutIndex)
+            systemAudioLastLiveSampleCount = 0
+            await transcribeSystemAudio(chunk, sessionID: sessionID, commitsChunk: true)
+        } else if samples.count - systemAudioLastLiveSampleCount >= 2 * 16_000 {
+            guard SpeechActivityDetector.containsSpeech(samples) else { return }
+            systemAudioLastLiveSampleCount = samples.count
+            await transcribeSystemAudio(samples, sessionID: sessionID, commitsChunk: false)
+        }
+    }
+
+    private func transcribeSystemAudio(_ samples: [Float], sessionID: UUID, commitsChunk: Bool) async {
+        systemAudioTranscribeInFlight = true
+        defer { systemAudioTranscribeInFlight = false }
+
+        let language = selectedLanguage == "auto" ? nil : selectedLanguage
+        let prompt = customDictionary.isEmpty ? nil : customDictionary.joined(separator: ", ")
+
+        do {
+            let text = try await whisperService.transcribe(samples: samples, language: language, prompt: prompt)
+            guard sessionID == systemAudioSessionID, isSystemAudioTranscribing else { return }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if commitsChunk {
+                if !trimmed.isEmpty {
+                    systemAudioCommittedText = WhisperService.mergeTranscriptFragments(systemAudioCommittedText, trimmed)
+                }
+                systemAudioTranscript = systemAudioCommittedText
+            } else if !trimmed.isEmpty {
+                systemAudioTranscript = WhisperService.mergeTranscriptFragments(systemAudioCommittedText, trimmed)
+            }
+            if !systemAudioTranscript.isEmpty {
+                systemAudioStatusMessage = nil
+            }
+        } catch {
+            print("[AppState] System audio transcription failed: \(error.localizedDescription)")
+        }
+    }
+
+    private static func systemAudioStartFailureMessage(for error: Error) -> String {
+        let nsError = error as NSError
+        if nsError.domain == "com.apple.ScreenCaptureKit.SCStreamErrorDomain" {
+            return "Screen Recording permission is required to capture system audio. Enable WhisperSwiftKey in System Settings > Privacy & Security > Screen Recording, then try again."
+        }
+        return "Could not start system audio capture: \(error.localizedDescription)"
     }
 
     private func handleTranscriptionResult(
         text: String,
         durationSeconds: Double,
         language: String?,
-        insertedPrefix: String = "",
         finalizationSessionID: UUID
     ) {
         guard finalizationGate.consume(sessionID: finalizationSessionID) else {
@@ -413,30 +639,25 @@ final class AppState: ObservableObject {
         transcriptionState = .done(trimmed)
 
         if autoInsertText {
-            let committed = textInsertionService.commitProvisionalText(trimmed)
-            if !committed {
-                if insertedPrefix.isEmpty {
-                    textInsertionService.insertText(trimmed)
-                } else {
-                    print("[AppState] Final transcript could not safely replace the provisional text")
-                }
-            }
+            finalizeTextInsertion(trimmed)
         } else {
             textInsertionService.cancelProvisionalInsertionSession()
         }
 
-        history.insert(
-            Transcription(
-                originalText: trimmed,
-                durationSeconds: durationSeconds,
-                language: language
-            ),
-            at: 0
-        )
-        if history.count > 500 {
-            history = Array(history.prefix(500))
+        saveToHistory(text: trimmed, durationSeconds: durationSeconds, language: language)
+    }
+
+    /// Completes delivery independently from transcription so the no-session
+    /// compatibility path can be regression-tested without recording audio.
+    func finalizeTextInsertion(_ text: String) {
+        switch textInsertionService.commitProvisionalText(text) {
+        case .committed:
+            break
+        case .needsFallbackInsertion:
+            textInsertionService.insertText(text)
+        case .provisionalTextPreserved:
+            print("[AppState] Final transcript could not safely replace the verified provisional text")
         }
-        persistHistory()
     }
 
     private func handleNoSpeechDetected() {
@@ -448,7 +669,6 @@ final class AppState: ObservableObject {
         _ samples: [Float]?,
         language: String?,
         prompt: String?,
-        insertedPrefix: String,
         finalizationSessionID: UUID
     ) {
         guard finalizationGate.pendingSessionID == finalizationSessionID else {
@@ -480,7 +700,6 @@ final class AppState: ObservableObject {
                         text: text,
                         durationSeconds: durationSeconds,
                         language: language,
-                        insertedPrefix: insertedPrefix,
                         finalizationSessionID: finalizationSessionID
                     )
                 }
@@ -509,9 +728,10 @@ final class AppState: ObservableObject {
         isPreparingWhisperRealtime = false
         shouldStopPreparingWhisperRealtime = false
         liveDictationTargetApplicationPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        textInsertionService.beginProvisionalInsertionSession(
-            targetApplicationPID: liveDictationTargetApplicationPID
-        )
+        liveDictationSupportsProvisionalInsertion =
+            textInsertionService.beginProvisionalInsertionSession(
+                targetApplicationPID: liveDictationTargetApplicationPID
+            )
     }
 
     private func startBufferedRecordingFallback(sessionID: UUID) {
@@ -633,7 +853,9 @@ final class AppState: ObservableObject {
         guard !trimmed.isEmpty else { return }
 
         let willReplaceProvisionalText =
-            autoInsertText && liveDictationInsertedText != trimmed
+            autoInsertText &&
+            liveDictationSupportsProvisionalInsertion &&
+            liveDictationInsertedText != trimmed
         if willReplaceProvisionalText {
             recordingOverlayController.beginProvisionalTextReplacement()
         }
@@ -648,10 +870,16 @@ final class AppState: ObservableObject {
         // appended or merged because Whisper may revise any earlier word.
         lastTranscription = trimmed
         guard autoInsertText else { return }
+        guard liveDictationSupportsProvisionalInsertion else { return }
         guard liveDictationInsertedText != trimmed else { return }
 
         if textInsertionService.updateProvisionalText(trimmed) {
             liveDictationInsertedText = trimmed
+        } else {
+            // Stop touching an editor that rejected or failed to reflect an AX
+            // update. Finalization will reconcile the last observed document
+            // state before deciding whether a normal paste is safe.
+            liveDictationSupportsProvisionalInsertion = false
         }
     }
 
